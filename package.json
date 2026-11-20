@@ -1,0 +1,11 @@
+{
+  "name": "dsh-openviking-skill-evolution",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH extension for reviewing OpenViking skills",
+  "exports": {".": "./index.js", "./locale/*.json": "./locale/*.json", "./icon": "./icon.svg"},
+  "files": ["index.js", "src", "cordis.patch.yml", "locale", "icon.svg"],
+  "scripts": {"test": "node --test test/*.test.js"},
+  "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}
+}

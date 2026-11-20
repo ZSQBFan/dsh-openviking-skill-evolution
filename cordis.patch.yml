@@ -1,0 +1,4 @@
+- insert:
+    - id: openviking-skill-evolution
+      name: dsh-openviking-skill-evolution
+      config: {}
