@@ -16,11 +16,16 @@ export function textBlocks(message) {
 export function readArguments(value) {
   try {
     const args = typeof value === 'string' ? JSON.parse(value) : value;
-    if (!args || Object.keys(args).some(k => !['uris', 'offset', 'limit'].includes(k))) return null;
-    const uris = typeof args.uris === 'string' ? [args.uris] : args.uris;
-    if (!Array.isArray(uris) || uris.length !== 1 || typeof uris[0] !== 'string') return null;
-    if (!isSkillUri(uris[0]) && !HOME.test(uris[0])) return null;
-    return { uri: uris[0], full: (args.offset ?? 0) === 0 && (args.limit ?? -1) === -1 };
+    if (!args || Object.keys(args).some(k => !['uri', 'uris', 'offset', 'limit'].includes(k))) return null;
+    if (Object.hasOwn(args, 'uri') && (Object.hasOwn(args, 'uris') || typeof args.uri !== 'string')) return null;
+    const requested = args.uri ?? args.uris;
+    const uris = typeof requested === 'string' ? [requested] : requested;
+    if (!Array.isArray(uris)) return null;
+    const requestedUris = [...new Set(uris.filter(uri => typeof uri === 'string' && (isSkillUri(uri) || HOME.test(uri))))];
+    if (!requestedUris.length) return null;
+    // Batch results mark the requested skills as observed but cannot supply a patch base.
+    const full = uris.length === 1 && (args.offset ?? 0) === 0 && (args.limit ?? -1) === -1;
+    return { requestedUris, full };
   } catch {
     return null;
   }
@@ -30,9 +35,10 @@ export function skillRead(call, result) {
   const content = result.text;
   if (!call.full || !result.ok || !content || content.length > 24000) return null;
   const wrapper = /^=== (viking:\/\/[^\n ]+) ===\r?\n/.exec(content);
-  const uri = wrapper?.[1] ?? call.uri;
-  if (!isSkillUri(uri) || (isSkillUri(call.uri) && uri !== call.uri)) return null;
-  if (HOME.test(call.uri) && (!uri.startsWith('viking://user/') || !uri.endsWith(call.uri.slice('viking://~'.length)))) return null;
+  const [requestedUri] = call.requestedUris;
+  const uri = wrapper?.[1] ?? requestedUri;
+  if (!isSkillUri(uri) || (isSkillUri(requestedUri) && uri !== requestedUri)) return null;
+  if (HOME.test(requestedUri) && (!uri.startsWith('viking://user/') || !uri.endsWith(requestedUri.slice('viking://~'.length)))) return null;
   const body = wrapper ? content.slice(wrapper[0].length) : content;
   const frontmatter = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(body);
   if (!frontmatter || /^=== viking:\/\//m.test(body) || /(?:\[truncated\]|\(line truncated)/i.test(body)) return null;
@@ -69,7 +75,7 @@ function compact(event) {
 
 export const evidenceProjection = {
   key: 'openviking-skill-evolution/evidence',
-  stateVersion: 1,
+  stateVersion: 2,
   init: (_header, inheritedEventCount) => ({ inheritedEventCount, calls: [], evidence: [] }),
   apply(state, event) {
     if (event.seq < state.inheritedEventCount) return state;
@@ -79,7 +85,7 @@ export const evidenceProjection = {
     if (item.type === 'tool/call') return { ...state, calls: [...state.calls, item].slice(-LIMIT) };
     const call = item.type === 'tool/result' ? state.calls.find(c => c.callId === item.callId) : undefined;
     if (item.type === 'tool/result' && !call) return state;
-    const evidence = call ? { ...item, ...skillRead(call, item), requestedUri: call.uri, text: undefined } : item;
+    const evidence = call ? { ...item, ...skillRead(call, item), requestedUris: call.requestedUris, text: undefined } : item;
     if ('text' in evidence && evidence.text === undefined) delete evidence.text;
     return { ...state, evidence: [...state.evidence, evidence].slice(-LIMIT) };
   },

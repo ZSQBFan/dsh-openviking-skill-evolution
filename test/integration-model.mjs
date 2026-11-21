@@ -14,12 +14,17 @@ const reads = {
 async function* stream({ messages }) {
   const userIndex = messages.findLastIndex(message => message.role === 'user' && message.source?.kind === 'user');
   const text = messages[userIndex]?.content?.map(part => part.text ?? '').join('');
-  const args = Object.hasOwn(reads, text) && !messages.slice(userIndex + 1).some(message => message.role === 'tool') && reads[text];
+  const realUri = process.env.SKILL_EVOLUTION_REAL_URI;
+  const tool = messages.slice(userIndex + 1).find(message => message.role === 'tool');
+  const realRead = realUri && text === 'Fixture use skill';
+  const args = !tool && (realRead ? { uri: realUri } : Object.hasOwn(reads, text) && reads[text]);
   if (args) {
     yield { type: 'tool-call-delta', index: 0, id: `fixture-${randomUUID()}`, name: 'mcp__openviking__read', argumentsDelta: JSON.stringify(args) };
     yield { type: 'finish', reason: { kind: 'tool-calls' } };
   } else {
-    yield { type: 'text-delta', index: 0, text: 'Fixture response complete.' };
+    const skillText = tool?.content?.map(part => part.text ?? '').join('');
+    const step = realRead && /^Run smoke(?: and check exit status)?\.$/m.exec(skillText ?? '')?.[0];
+    yield { type: 'text-delta', index: 0, text: step ? `Skill step: ${step}` : 'Fixture response complete.' };
     yield { type: 'finish', reason: { kind: 'stop' } };
   }
 }

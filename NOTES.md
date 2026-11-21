@@ -45,7 +45,36 @@
 
 独立审阅发现两个 M1 边界问题。若后续批量读取包含同一技能，现有投影会略过整次调用，旧单读仍可能生成提案。单行 diff 在 CRLF 文件中丢失行尾的 CR 字符，末行无换行时也缺少相应标记。将当前版本保存为只读阶段基线。M2 可以先在隔离 OV 做接口探针。将提案接入写回前，需修复这两个问题并加入回归测试。
 
+## 2026-11-20 · M2 隔离审批写回与恢复验收通过
+
+- 修复 M1 两个写入前置问题。后续批读包含目标时，旧单读基线失效。单行 diff 保留 CRLF 和末行无换行语义，两种补丁均以真实 `git apply --unidiff-zero` 验证。投影版本升至 2，已有 v1 缓存的升级重放仍待验证。
+- 默认仍为影子模式。启用 `approval` 后只纳管一个明确指定的私有 canonical URI。使用 `/skill-refine <URI>` 取得 `proposalId` 与 `approvalDigest`。在原会话用 `/skill-approve <ID> <digest>`、`/skill-reject <ID> <digest>` 或 `/skill-rollback <ID> <digest>` 操作。审批摘要绑定已展示提案和整包变更前后摘要。账本持久化状态和恢复快照，写前重读并比较正文、来源与附件。遇到请求结果不确定时，重复命令只做回读确认。
+- `npm test` 通过 22 项，覆盖未知基线、预览后改动正文或附件、错误会话或摘要、拒批、重复审批、超时后读回、索引未确认和回滚冲突。`python3 test/host-smoke.py` 在 DSH Desktop `0.2.2-rc.3` 临时 profile 验证命令注册、预览零写入、审批去重、回滚和卸载，写端使用进程内夹具。`git diff --check` 与 `npm pack --dry-run --ignore-scripts` 通过。
+- [原生接口探针](<docs/m2-api-probe.md>) 使用 OpenViking `0.5.5` 与临时账户、存储及回环推理。附加 `--approval-probe test/approval-real.mjs` 的完整运行退出码为 0。通过真实 HTTP 整包审批和恢复，分别回读正文 SHA-256 `f52b2605587c1076230afb9d3c586ebe8248e8017ce3313a540899cecaabe411` 与 `dac5696f5f03b1017f6750c3751a77d1646bb681b4d3e1a491ab90d954f0936d`。逐字节核对 `assets/blob.bin`、`refs/steps.txt` 及来源元数据，并确认按私有 canonical URI 可检索。原生接口探针另验证描述变化可反映到索引和私有写入保持同名共享包不变。
+- OpenViking `0.5.5` 接受陈旧 `If-Match`，客户端超时后也曾观察到写入完成。当前真实写端限定于显式配置的回环单写者实例，单写者由运行环境保证。当前确认范围为普通技能包内容、附件、来源元数据和索引可检索性。跨端并发、部署实例写入、独立隐私配置和 ACL 恢复尚未验证。
+
 ## 后续验收
 
-1. M2 在隔离 OV 核验私有技能写入口及权限、审批绑定、版本冲突、附件存留、索引回读和恢复。条件更新尚无部署证据，自动覆盖门槛仍保留。
-2. M3 走正常 DSH 入口完成隔离技能加载、纠正、复盘、审批、写回、再次加载和回滚。MVP 后按开发任务中的阶段推进上游对齐。
+## 2026-11-20 · M3 MVP 端到端通过
+
+- 使用本机 DSH Desktop `0.2.2-rc.3` 的正常 Web 会话入口和临时 profile，连接独立 OpenViking `0.5.5` 的 `/mcp`（Streamable HTTP）与技能 REST API。测试账号 `alice` 只操作一个私有夹具技能。DSH 模型使用确定性适配器，从每次 MCP 返回的正文提取步骤，便于独立验证行为。
+- 首次 Web 复盘返回 `no_learning_evidence`，事件证实原生 MCP 使用单数 `uri`，既有测试后端使用 `uris`。证据投影现支持两种输入，含糊的双字段请求仍会跳过。重启隔离 DSH 后，原会话读取事件 17/19 和纠正事件 29 生成同一夹具的一行补丁。复盘、审批与回滚分别记录为事件 37、39、41，状态依次为 `pending`、`applied`、`rolled_back`。
+- 三个独立会话通过同一 MCP URI 分别读到旧版、新版、恢复的旧版。页面输出分别是 `Skill step: Run smoke.`、`Skill step: Run smoke and check exit status.`、`Skill step: Run smoke.`。SHA-256 依次为 `dac5696f5f03b1017f6750c3751a77d1646bb681b4d3e1a491ab90d954f0936d`、`f52b2605587c1076230afb9d3c586ebe8248e8017ce3313a540899cecaabe411`、`dac5696f5f03b1017f6750c3751a77d1646bb681b4d3e1a491ab90d954f0936d`。
+- 审批与回滚成功状态均经过写后整包快照及索引核对。独立校验通过真实 REST 列表、详情、下载和搜索，核实私有目录唯一命中、源元数据还原，`assets/blob.bin` 和 `refs/steps.txt` 逐字节一致，恢复后 revision 为 `8e91d456e77b6387ddd16f7c32a30288115ce5bd7258d83886c2d8b655bc84d6`。搜索确认目标可发现，正文版本由 MCP 读取哈希证明。
+- `npm test` 23/23，`python3 -B test/host-smoke.py` 通过，`git diff --check` 通过。隔离服务在验收后退出。
+
+### 复现
+
+1. 使用 OpenViking 0.5.5 对应 venv，设置 `DSH_NODE_EXECUTABLE` 为 Desktop Electron 可执行文件，`DSH_INSTALL_DIR` 为该安装中 `@deepseek-ai/dsh` 根目录。运行 `python -B test/ov-m2-probe.py --server-bin /path/to/openviking-server --web`。进程输出临时证据目录，Web URL 在该目录 `host-1.log` 首行。把 URL 中的令牌仅留在本机夹具。
+2. 在 Web 新会话发送 `Fixture use skill`。从证据目录的 `events.jsonl` 读取对应成功 `tool/result` 的 `seq`。发送四行纠正，依次为 `技能纠正 <seq>`、`原文：Run smoke.`、`改为：Run smoke and check exit status.`、`原因：核对退出状态。`。执行 `/skill-refine viking://user/alice/skills/ov-m2-probe-fixture/SKILL.md`。
+3. 在原会话执行 `/skill-approve <proposalId> <approvalDigest>`，确认 `applied`。在新会话重发 `Fixture use skill`，确认新版。回到原会话执行 `/skill-rollback <proposalId> <approvalDigest>`，确认 `rolled_back`。再建一个会话重发 `Fixture use skill`，确认旧版。
+4. 服务运行期间执行 `python -B test/verify-m3.py <临时证据目录>`。通过后在启动终端输入 `quit`。
+
+本轮验收覆盖隔离单写者路径。实际模型理解和执行技能、日用 profile、多人并发与生产写回仍待单独验证。OpenViking 0.5.5 实测缺乏可用的条件写回，推广到多写者环境前应以服务端条件更新为前置。
+
+## 2026-11-22 · P0 基线复核与真实模型冒烟准备
+
+- 独立复核发现两项写回风险：整包更新可能影响技能的独立隐私配置；审批等待队列时被取消仍可能写入。隔离适配器现在通过 `/api/v1/privacy-configs/skill` 检查目标名，不取密钥值；存在隐私配置、写入候选含隐私引用或检查结果异常时停止。审批执行权到手时、写前和临时包上传后重新检查取消状态。已发出的 PUT 仍按不确定写入处理并回读，取消不保证撤销服务端已接受的请求。
+- 24 项 Node 测试、隔离 DSH 冒烟、OpenViking 0.5.5 原生审批和回滚均通过。原生探针先添加合成隐私字段，确认审批被拦截而字段仍在，移除测试字段后确认审批和回滚正常。
+- 真实模型冒烟入口：保持临时 DSH profile、测试技能及只读 MCP，不连接日用 OpenViking，不启用审批。用独立测试凭据从本机启动环境设置 `DEEPSEEK_API_KEY`，同时设 `SKILL_EVOLUTION_P0_MODEL=deepseek-flash`，沿用 M3 的 DSH 两个安装路径变量，运行 `python3 -B test/integration-host.py`。密钥不要发到对话或写入仓库。模型必须通过 MCP 读到事先不在提示中的标记 `ORCHID-482` 并按技能答复；然后给出一条有实际改动的四行纠正，验证 `/skill-refine viking://user/fixture/skills/demo/SKILL.md` 的 diff。重启临时宿主并复查会话和去重；本机 MCP 轨迹中应只有读取请求。
+- 当前启动环境未配置 `DEEPSEEK_API_KEY`，真实模型与日用 Desktop 试用尚未验收。未动日用 profile 或真实技能；日用只读加载需另行确认。

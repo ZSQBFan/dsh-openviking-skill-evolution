@@ -28,7 +28,8 @@ function handle({ method, params }) {
     return { isError: true, content: content(`NOT_FOUND: ${uri}`) };
   }
   let skill = uri === sharedUri ? body.replace('Run smoke.', 'Run shared smoke.') : body;
-  if (uri === privateUri && reads.get(key) > 1) skill += '\nFixture newer version.\n';
+  if (process.argv[3] === '--p0') skill = skill.replace('Run smoke.', 'Run smoke and report ORCHID-482.');
+  else if (uri === privateUri && reads.get(key) > 1) skill += '\nFixture newer version.\n';
   if (limit > 0) skill = skill.split('\n').slice(0, limit).join('\n');
   return { content: content(skill) };
 }

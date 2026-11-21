@@ -3,20 +3,47 @@ import { isSkillUri } from './evidence.js';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const noChange = reason => ({ action: 'no_change', reason });
+const NO_NEWLINE = '\\ No newline at end of file';
 
 function patch(skill, correction, sessionId) {
   const [, , before, after, rationale] = /^技能纠正 (\d+)\n原文：([^\r\n]+)\n改为：([^\r\n]+)\n原因：([^\r\n]+)$/u.exec(correction.text) ?? [];
   if (!before || !after || !rationale) return noChange('invalid_correction');
   const body = skill.body.slice(skill.frontmatter.length);
-  const lines = body.split(/\r?\n/);
+  const rawLines = body.split('\n');
+  const lines = rawLines.map((line, index) => index < rawLines.length - 1 ? line.replace(/\r$/, '') : line);
   const index = lines.indexOf(before);
   if (index < 0 || lines.lastIndexOf(before) !== index || before === after || /^---\s*$/.test(after)) return noChange('change_not_unique');
   const line = skill.frontmatter.split('\n').length + index;
+  const ending = index === rawLines.length - 1 ? `\n${NO_NEWLINE}\n` : rawLines[index] === before ? '\n' : '\r\n';
   return {
     action: 'patch', uri: skill.uri, baseSha256: digest(skill.body), reason: rationale,
     evidence: { sessionId, readCallSeq: skill.callSeq, readResultSeq: skill.seq, userSeq: correction.seq },
-    diff: `--- ${skill.uri}\n+++ ${skill.uri}\n@@ -${line} +${line} @@\n-${before}\n+${after}\n`,
+    diff: `--- ${skill.uri}\n+++ ${skill.uri}\n@@ -${line} +${line} @@\n-${before}${ending}+${after}${ending}`,
   };
+}
+
+// Apply the single-line patch emitted by review to the exact supplied base.
+export function applySkillDiff(base, diff, uri) {
+  if (typeof base !== 'string' || typeof diff !== 'string' || !isSkillUri(uri)) throw new Error('invalid_skill_diff');
+  const [oldHeader, newHeader, hunk, ...body] = diff.split('\n');
+  const line = Number(/^@@ -([1-9]\d*) \+\1 @@$/.exec(hunk)?.[1]);
+  if (oldHeader !== `--- ${uri}` || newHeader !== `+++ ${uri}` || !Number.isSafeInteger(line) || body.pop() !== '') {
+    throw new Error('invalid_skill_diff');
+  }
+  const unterminated = body.length === 4 && body[1] === NO_NEWLINE && body[3] === NO_NEWLINE;
+  if (!unterminated && body.length !== 2) throw new Error('invalid_skill_diff');
+  const oldLine = /^-([^\r\n]+)(\r?)$/.exec(body[0]);
+  const newLine = /^\+([^\r\n]+)(\r?)$/.exec(body[unterminated ? 2 : 1]);
+  if (!oldLine || !newLine || oldLine[2] !== newLine[2] || (unterminated && oldLine[2])) {
+    throw new Error('invalid_skill_diff');
+  }
+  const lines = base.split('\n');
+  const index = line - 1;
+  if (lines[index] !== oldLine[0].slice(1) || unterminated !== (index === lines.length - 1)) {
+    throw new Error('skill_diff_base_mismatch');
+  }
+  lines[index] = newLine[0].slice(1);
+  return lines.join('\n');
 }
 
 function create(uri, experience, sessionId) {
@@ -37,9 +64,9 @@ export function review(state, sessionId, uri) {
   const successful = history.filter(event => event.type === 'tool/result' && event.uri === uri);
   const latest = successful.at(-1);
   const userEvidence = history.filter(event => event.type === 'user/message');
-  const targetName = uri.split('/').at(-2);
+  const homeAlias = uri.startsWith('viking://user/') ? uri.replace(/^viking:\/\/user\/[^/]+/, 'viking://~') : null;
   const blocked = history.some(event => event.type === 'tool/result' && event.seq > (latest?.seq ?? -1)
-    && (event.requestedUri === uri || (uri.startsWith('viking://user/') && event.requestedUri === `viking://~/skills/${targetName}/SKILL.md`)));
+    && (event.requestedUris.includes(uri) || event.requestedUris.includes(homeAlias)));
   const corrections = userEvidence.filter(event => {
     const seq = /^技能纠正 (\d+)\n/u.exec(event.text)?.[1];
     return seq != null && successful.some(read => read.seq === Number(seq) && read.seq < event.seq);
