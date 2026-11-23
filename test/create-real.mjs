@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import { createApprovalService } from '../src/approval.js';
+import { createOpenVikingAdapter } from '../src/ov-adapter.js';
+import { review } from '../src/review.js';
+
+const { OV_M2_ORIGIN: origin, OV_M2_KEY: apiKey, OV_M2_URI, OV_M2_LEDGER: directory } = process.env;
+const managedUri = OV_M2_URI.replace(/\/[^/]+\/SKILL\.md$/, '/new-governance-skill/SKILL.md');
+const adapter = createOpenVikingAdapter({ origin, apiKey, managedUri, mode: 'isolated-single-writer' });
+const service = createApprovalService({ directory, managedUri, adapter });
+const sessionId = 'create-native-probe';
+const text = `技能经验 ${managedUri}\n描述：Exercise the native skill lifecycle.\n步骤：Check the resulting index.\n原因：Verify the exact URI after every mutation.`;
+const proposal = review({ evidence: [{ type: 'user/message', seq: 4, text }] }, sessionId, managedUri);
+assert.equal(await adapter.read(managedUri), null);
+const preview = await service.stage(proposal);
+assert.equal(preview.status, 'pending');
+const vote = { id: proposal.proposalId, digest: preview.approvalDigest, sessionId };
+const applied = await service.approve(vote);
+assert.equal(applied.status, 'applied', JSON.stringify(await adapter.read(managedUri)));
+assert.equal((await service.rollback(vote)).status, 'rolled_back');
+assert.equal(await adapter.read(managedUri), null);
+console.log(JSON.stringify({ event: 'create_service', create: 'applied', restore: 'rolled_back', absent: true }));

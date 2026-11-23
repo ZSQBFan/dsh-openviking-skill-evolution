@@ -1,0 +1,21 @@
+{
+  "name": "dsh-openviking-skill-evolution",
+  "version": "0.2.4",
+  "private": true,
+  "license": "MIT",
+  "repository": {"type": "git", "url": "git+https://github.com/ZSQBFan/dsh-openviking-skill-evolution.git"},
+  "type": "module",
+  "description": "DSH extension for reviewing OpenViking skills",
+  "exports": {".": "./index.js", "./client": "./client.js", "./locale/*.json": "./locale/*.json", "./icon": "./icon.svg"},
+  "files": ["index.js", "client.js", "src", "cordis.patch.yml", "locale", "icon.svg", "CHANGELOG.md", "docs/memory-link.md", "docs/m2-api-probe.md"],
+  "engines": {"node": ">=22"},
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:release": "node test/release-pack.mjs",
+    "test:release:dsh": "python3 -B test/release-smoke.py"
+  },
+  "dsh": {
+    "bundle": {"patch": "./cordis.patch.yml"},
+    "client": {"platform": "web", "immediately": true, "inject": ["@deepseek-ai/dsh-client-ui-settings-general"]}
+  }
+}
