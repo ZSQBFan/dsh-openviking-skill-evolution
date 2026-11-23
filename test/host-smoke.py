@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='dsh-skill-evolution-') as directory:
                     break
                 time.sleep(0.1)
             if not result.exists():
-                raise RuntimeError(f'Host emitted no result, exit code {host.poll()}')
+                raise RuntimeError(f'Host emitted no result, exit code {host.poll()}\n{(root / "host.log").read_text()[-4000:]}')
             report = json.loads(result.read_text())
             print(json.dumps(report, ensure_ascii=False))
             if not report['ok']:

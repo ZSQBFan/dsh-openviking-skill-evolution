@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
+import { applyAttachmentOperations, validateAttachmentOperations } from './attachments.js';
 import { isSkillUri } from './evidence.js';
+import { skillArchive } from './skill-archive.js';
 import * as review from './review.js';
 
 const queues = new Map();
@@ -21,13 +23,13 @@ function snapshotHash(snapshot) {
   return digest(JSON.stringify(canonical(snapshot)));
 }
 
-async function save(directory, target, records) {
+export async function saveState(directory, target, state) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const temporary = join(directory, `.ledger-${randomUUID()}`);
   try {
     const file = await open(temporary, 'wx', 0o600);
     try {
-      await file.writeFile(JSON.stringify({ version: 1, records }) + '\n');
+      await file.writeFile(JSON.stringify(state) + '\n');
       await file.sync();
     } finally {
       await file.close();
@@ -47,7 +49,7 @@ function publicRecord(record) {
 
 export function createApprovalService({ directory, managedUri, adapter }) {
   if (!isAbsolute(directory) || !isSkillUri(managedUri) || !managedUri.startsWith('viking://user/') ||
-      !['atomic-conditional', 'isolated-single-writer'].includes(adapter?.mode) ||
+      !['atomic-conditional', 'isolated-single-writer', 'native-verified-readback'].includes(adapter?.mode) ||
       !['read', 'replace', 'verifyIndex'].every(key => typeof adapter[key] === 'function')) {
     throw new TypeError('Approval requires an absolute ledger directory, a private skill and a verified adapter');
   }
@@ -65,7 +67,7 @@ export function createApprovalService({ directory, managedUri, adapter }) {
         if (error.code !== 'ENOENT') throw error;
         records = [];
       }
-      return operation(records, () => save(root, target, records));
+      return operation(records, () => saveState(root, target, { version: 1, records }));
     });
     queues.set(root, queued.catch(() => {}));
     return queued;
@@ -73,6 +75,7 @@ export function createApprovalService({ directory, managedUri, adapter }) {
 
   async function readSnapshot() {
     const snapshot = await adapter.read(managedUri);
+    if (snapshot === null && typeof adapter.create === 'function') return null;
     if (typeof snapshot?.body !== 'string' || !snapshot.files || !snapshot.metadata) throw Error('Incomplete skill snapshot');
     return structuredClone(snapshot);
   }
@@ -94,17 +97,23 @@ export function createApprovalService({ directory, managedUri, adapter }) {
 
   async function reconcile(record, persist) {
     const restoring = record.status === 'restoring';
-    const expected = restoring ? record.before : record.after;
+    let expected = restoring ? record.before : record.after;
     let live;
     try {
       live = await readSnapshot();
     } catch {
       return note(record, 'write_unconfirmed', persist);
     }
-    if (snapshotHash(live) !== snapshotHash(expected)) return note(record, 'write_unconfirmed', persist);
+    if (snapshotHash(live) !== snapshotHash(expected)) {
+      if (restoring || record.before !== null || !live || !adapter.matchesCreated?.(managedUri, expected, live)) {
+        return note(record, 'write_unconfirmed', persist);
+      }
+      record.after = expected = live;
+      await persist();
+    }
     let indexed;
     try {
-      indexed = await adapter.verifyIndex(managedUri, expected);
+      indexed = expected === null ? (await adapter.verifyAbsent?.(managedUri) ?? true) : await adapter.verifyIndex(managedUri, expected);
     } catch {
       indexed = false;
     }
@@ -145,8 +154,11 @@ export function createApprovalService({ directory, managedUri, adapter }) {
       await transition(record, restoring ? 'restoring' : 'applying', persist);
       let skipped = Boolean(input.signal?.aborted);
       if (!skipped) {
-        try { skipped = (await adapter.replace(managedUri, to, from, input.signal)) === false; }
-        catch { /* A failed response can follow a committed write. */ }
+        try {
+          const operation = to === null ? adapter.remove : from === null ? adapter.create : adapter.replace;
+          const args = to === null ? [managedUri, from, input.signal] : [managedUri, to, from, input.signal];
+          skipped = (await operation.call(adapter, ...args)) === false;
+        } catch { /* A failed response can follow a committed write. */ }
       }
       if (skipped) {
         await transition(record, previous, persist);
@@ -157,9 +169,19 @@ export function createApprovalService({ directory, managedUri, adapter }) {
   }
 
   return {
-    stage(proposal) {
+    async stage(input) {
+      let proposal;
+      try {
+        proposal = structuredClone(input);
+      } catch {
+        return { status: 'invalid_proposal' };
+      }
       return run(async (records, persist) => {
-        if (proposal?.action !== 'patch' || proposal.uri !== managedUri || !hex.test(proposal.baseSha256) ||
+        const creating = proposal?.action === 'create';
+        const supported = creating
+          ? proposal.baseSha256 === null && typeof adapter.create === 'function' && typeof adapter.remove === 'function'
+          : proposal?.action === 'patch' && hex.test(proposal.baseSha256);
+        if (!supported || proposal.uri !== managedUri ||
             !hex.test(proposal.proposalId) || typeof proposal.evidence?.sessionId !== 'string') {
           return { status: 'not_managed' };
         }
@@ -167,11 +189,28 @@ export function createApprovalService({ directory, managedUri, adapter }) {
         if (digest(JSON.stringify(display)) !== proposalId) return { status: 'invalid_proposal' };
         const existing = records.find(record => record.proposal.proposalId === proposalId);
         if (existing) return publicRecord(existing);
+        let operations;
+        try {
+          operations = validateAttachmentOperations(proposal.operations);
+        } catch {
+          return { status: 'invalid_proposal' };
+        }
+        if ((!operations.length || creating) && proposal.diff === undefined) return { status: 'invalid_proposal' };
+        if (creating && operations.some(op => op.action !== 'write_file' || op.baseSha256 !== null)) {
+          return { status: 'invalid_proposal' };
+        }
         const before = await readSnapshot();
-        if (digest(before.body) !== proposal.baseSha256) return { status: 'conflict' };
-        const after = { ...before, body: review.applySkillDiff(before.body, proposal.diff, managedUri) };
+        if (creating ? before !== null : !before || digest(before.body) !== proposal.baseSha256) return { status: 'conflict' };
+        const withBody = creating
+          ? { body: review.applyCreateDiff(proposal.diff, managedUri), files: {}, metadata: { directories: [], source: { type: 'skill_evolution' } } }
+          : { ...before, body: proposal.diff === undefined ? before.body : review.applySkillDiff(before.body, proposal.diff, managedUri) };
+        const after = applyAttachmentOperations(withBody, operations);
+        if (!after) return { status: 'conflict' };
+        if (operations.length) {
+          try { skillArchive(after); } catch { return { status: 'invalid_proposal' }; }
+        }
         const record = {
-          proposal: structuredClone(proposal), before, after,
+          proposal, before, after,
           approvalDigest: digest(JSON.stringify([proposalId, snapshotHash(before), snapshotHash(after)])),
           status: 'pending', history: [],
         };
@@ -179,6 +218,9 @@ export function createApprovalService({ directory, managedUri, adapter }) {
         return transition(record, 'pending', persist);
       });
     },
+    list: () => run(records => records.filter(record => record.proposal.uri === managedUri).map(record => ({
+      ...publicRecord(record), history: record.history,
+    }))),
     approve: input => vote(input, 'approve'),
     reject: input => vote(input, 'reject'),
     rollback: input => vote(input, 'rollback'),

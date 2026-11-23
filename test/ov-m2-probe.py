@@ -284,7 +284,8 @@ def main():
                                    cwd=root, check=True, env=web_env)
                 if args.approval_probe:
                     subprocess.run([node, str(args.approval_probe.resolve())], cwd=root, check=True,
-                                   timeout=90, env={**env, 'OV_M2_ORIGIN': base, 'OV_M2_KEY': alice,
+                                   timeout=90, env={**env, **{key: os.environ[key] for key in ('DSH_NODE_EXECUTABLE', 'DSH_INSTALL_DIR') if key in os.environ},
+                                                     'OV_M2_ORIGIN': base, 'OV_M2_KEY': alice,
                                                     'OV_M2_URI': f'{URI}/SKILL.md',
                                                     'OV_M2_LEDGER': str(root / 'ledger')})
             except BaseException:

@@ -41,10 +41,15 @@ export function apply(ctx) {
         toolCallId: 'fixture-read', isError: false, content: [{ type: 'text', text: body }],
       } }, { surfaceOp: 'append', sourceEventSeqs: [call.seq] });
       session.append('user/message', { id: 'fixture-correction', role: 'user', source: { kind: 'user' },
-        content: [{ type: 'text', text: `技能纠正 ${read.seq}\n原文：Run smoke.\n改为：Run smoke and check exit status.\n原因：Verify the result.` }],
+        content: [{ type: 'text', text: `技能纠正 ${uri}\n原文：Run smoke.\n改为：Run smoke and check exit status.\n原因：Verify the result.` }],
       }, { surfaceOp: 'append' });
       const execute = () => ctx.commands.execute(agent, `/skill-refine ${uri}`, [], new AbortController().signal);
+      const listing = JSON.parse((await ctx.commands.execute(agent, '/skill-refine', [], new AbortController().signal)).result.text);
+      assert.deepEqual(listing.loaded, [{ uri, readResultSeq: read.seq }]);
+      assert.equal(listing.candidates[0].command, `/skill-refine ${uri}`);
+      assert.equal(listing.candidates[0].status, 'ready');
       const proposal = JSON.parse((await execute()).result.text);
+      assert.equal(listing.candidates[0].baseSha256, proposal.baseSha256);
       assert.equal(proposal.action, 'patch');
       assert.equal(proposal.evidence.readResultSeq, read.seq);
       assert.match(proposal.diff, /\+Run smoke and check exit status\./);

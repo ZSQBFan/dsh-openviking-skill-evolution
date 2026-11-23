@@ -1,5 +1,6 @@
+import { join } from 'node:path';
 import { evidenceProjection } from './src/evidence.js';
-import { review } from './src/review.js';
+import { listReviewCandidates, review } from './src/review.js';
 import { createApprovalService } from './src/approval.js';
 
 function result(outcome) {
@@ -17,6 +18,15 @@ export const inject = ['commands', 'sessionProjections'];
 export async function apply(ctx, config = {}) {
   const approval = config.approval ? await loadApproval(config.approval) : undefined;
   const projection = await ctx.sessionProjections.register(evidenceProjection);
+  const profile = ctx.get('profileContext');
+  const options = config.evolution ?? (profile?.dir && {
+    directory: join(profile.dir, 'skill-evolution'), owner: null,
+  });
+  const evolution = options ? await (await import('./src/evolution.js')).mountEvolution(ctx, options, projection) : null;
+  if (evolution) ctx.commands.register({
+    name: 'skill-review', description: 'Run an immediate skill evolution review',
+    handler: async ({ agent, signal }) => result(await evolution.run(agent, 'manual', signal)),
+  });
   ctx.commands.register({
     name: 'skill-refine',
     description: 'Review OpenViking skill use in this session',
@@ -24,10 +34,8 @@ export async function apply(ctx, config = {}) {
     handler: async ({ agent, rawInput }) => {
       const state = projection.stateOf(agent.session);
       const uri = rawInput.trim();
-      const outcome = uri ? review(state, String(agent.session.id), uri) : {
-        action: 'no_change', reason: 'select_skill',
-        loaded: state.evidence.filter(item => item.uri).map(({ uri, seq }) => ({ uri, readResultSeq: seq })),
-      };
+      const sessionId = String(agent.session.id);
+      const outcome = uri ? review(state, sessionId, uri) : listReviewCandidates(state, sessionId);
       if (approval && outcome.action === 'patch' && outcome.uri === config.approval.managedUri) {
         const { status, approvalDigest } = await approval.stage(outcome);
         return result({ ...outcome, approval: { status, approvalDigest } });

@@ -69,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix='dsh-skill-integration-') as directory:
     print(f'Fixture evidence directory: {root}', flush=True)
     for generation in range(1, 4):
         log_path = root / f'host-{generation}.log'
-        with log_path.open('w') as log, subprocess.Popen(args, cwd=root, env=env, stdout=log, stderr=log) as host:
+        with log_path.open('w') as log, subprocess.Popen(args, cwd=root, env={**env, 'SKILL_EVOLUTION_GENERATION': str(generation)}, stdin=subprocess.DEVNULL, stdout=log, stderr=log) as host:
             try:
                 deadline = time.monotonic() + 20
                 while time.monotonic() < deadline and host.poll() is None:

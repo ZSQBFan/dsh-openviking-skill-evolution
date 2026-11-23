@@ -11,6 +11,6 @@ export function apply(ctx) {
       fields = { callId: source.callId, isError, sha256: hash(content.map(block => block.text ?? '').join('\n')) };
     }
     if (type === 'command/done') fields = { kind: data.kind, text: data.text };
-    if (fields) appendFileSync(process.env.SKILL_EVOLUTION_EVENTS, JSON.stringify({ sessionId: session.id, type, seq, ...fields }) + '\n');
+    if (fields) appendFileSync(process.env.SKILL_EVOLUTION_EVENTS, JSON.stringify({ sessionId: session.id, type, seq, generation: Number(process.env.SKILL_EVOLUTION_GENERATION) || 1, ...fields }) + '\n');
   });
 }

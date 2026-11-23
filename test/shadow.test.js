@@ -34,6 +34,28 @@ function fixture(inherited = 0) {
   return f;
 }
 
+test('a correction can name the canonical skill without an event number', () => {
+  const f = fixture();
+  const readResultSeq = f.read(own);
+  f.read(shared);
+  const userSeq = f.user(`技能纠正 ${own}\n原文：Run smoke.\n改为：Run smoke and verify exit status.\n原因：需要核对退出状态`);
+  const outcome = f.review();
+  assert.equal(outcome.action, 'patch');
+  assert.equal(outcome.evidence.readResultSeq, readResultSeq);
+  assert.equal(outcome.evidence.userSeq, userSeq);
+  assert.equal(f.review(shared).reason, 'no_learning_evidence');
+});
+
+test('URI corrections do not bind to a failed read or a read after the correction', () => {
+  const f = fixture();
+  f.read(own);
+  f.read(own, original, { isError: true });
+  f.user(`技能纠正 ${own}\n原文：Run smoke.\n改为：Run smoke and verify exit status.\n原因：需要核对退出状态`);
+  assert.equal(f.review().reason, 'latest_read_unusable');
+  f.read(own);
+  assert.equal(f.review().reason, 'correction_read_required');
+});
+
 test('native MCP singular read supplies an exact patch base', () => {
   const f = fixture();
   const seq = f.read(own, original, { args: { uris: undefined, uri: own } });
@@ -83,6 +105,15 @@ test('Git applies the patch to an unterminated final line without adding a termi
   const base = original.slice(0, -1);
   f.correct(f.read(own, base));
   assertGitApplies(f.review(), base, base.replace('Run smoke.', 'Run smoke and verify exit status.'));
+});
+
+test('applySkillDiff preserves the preamble and exact context across multiple hunks', () => {
+  const base = '---\nname: demo\ndescription: Demo.\n---\n\nA\nB\nC\nD\n';
+  const headers = `--- ${own}\n+++ ${own}\n`;
+  const diff = `${headers}@@ -6,2 +6,3 @@\n-A\n+AA\n+AAA\n B\n@@ -9 +9,0 @@\n-D\n`;
+  assert.equal(applySkillDiff(base, diff, own), base.replace('A\n', 'AA\nAAA\n').replace('D\n', ''));
+  assert.throws(() => applySkillDiff(base.replace('B\n', 'X\n'), diff, own), /skill_diff_base_mismatch/);
+  assert.throws(() => applySkillDiff(base, `${headers}@@ -3 +3 @@\n-description: Demo.\n+description: Replaced.\n`, own), /invalid_skill_diff/);
 });
 
 test('applySkillDiff applies one approved hunk at its exact position with its original terminator', () => {
