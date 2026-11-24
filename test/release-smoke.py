@@ -40,7 +40,8 @@ def main():
         pack.write_text(metadata)
         print(metadata, end='', flush=True)
         probe = root / 'release-probe.mjs'
-        shutil.copyfile(repo / 'test/release-probe.mjs', probe)
+        for fixture in ['release-probe.mjs', 'release-gate.mjs', 'release-ov-fixture.mjs']:
+            shutil.copyfile(repo / 'test' / fixture, root / fixture)
         patch.write_text(f'''- id: workspace-controller
   config:
     documentsDirectory: {json.dumps(str(root / 'Documents'))}

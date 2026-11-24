@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { mountEvolution } from '../src/evolution.js';
 
-async function fixture(t, chunks, { evidence = [], onRequest } = {}) {
+async function fixture(t, chunks, { evidence = [], onRequest, settings = {}, events: eventFixture, agents = [] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'skill-review-log-'));
   const logDirectory = join(directory, 'review-stream');
   const hooks = {};
@@ -16,19 +16,26 @@ async function fixture(t, chunks, { evidence = [], onRequest } = {}) {
     for (const fn of dispose) fn();
     await rm(directory, { recursive: true, force: true });
   });
-  const events = [{ type: 'user/message', seq: 1, data: {} }, { type: 'turn/end', seq: 2, data: {} }];
-  const agent = { session: { id: 'fixture' }, provider: 'fixture', model: 'fixture' };
+  const events = eventFixture ?? [{ type: 'user/message', seq: 1, data: {} }, { type: 'turn/end', seq: 2, data: {} }];
+  const agent = { session: { id: 'fixture' }, provider: 'main-provider', model: 'main-model' };
   const llm = { async *stream(options) {
     assert.equal(options.purpose, 'automatic-review');
-    onRequest?.(JSON.parse(options.messages[0].content[0].text));
-    yield* (typeof chunks === 'function' ? chunks() : chunks);
+    assert.equal(options.provider, 'fixture-provider');
+    assert.equal(options.model, 'fixture-model');
+    onRequest?.(JSON.parse(options.messages[0].content[0].text), options);
+    yield* (typeof chunks === 'function' ? chunks(options) : chunks);
   } };
   const ctx = {
     on(name, callback) { hooks[name] = callback; }, inject() {}, effect(fn) { dispose.push(fn()); },
-    get(name) { if (name === 'llm') return llm; },
+    get(name) {
+      if (name === 'llm') return llm;
+      if (name === 'agents') return { list: () => agents };
+    },
     sessionProjections: { async register(p) { return { stateOf: () => p.key.endsWith('/automatic-evidence') ? { events } : {} }; } },
   };
-  const mount = () => mountEvolution(ctx, { directory, owner: 'fixture', settings: { mode: 'shadow' } }, { stateOf: () => ({ evidence }) });
+  const mount = () => mountEvolution(ctx, { directory, owner: 'fixture', settings: {
+    mode: 'shadow', provider: 'fixture-provider', model: 'fixture-model', ...settings,
+  } }, { stateOf: () => ({ evidence }) });
   return { directory, logDirectory, agent, mount, hooks };
 }
 
@@ -53,13 +60,20 @@ test('automatic review logs mixed stream metadata and accepts the valid answer',
   assert.deepEqual(trace.events.map(event => event.type), mixed.map(chunk => chunk.type));
   assert.equal(trace.events[1].bytes, Buffer.byteLength(verdict));
   assert.equal(trace.finish, 'stop');
+  const ledger = JSON.parse(await readFile(join(f.directory, 'governance.json'), 'utf8')).runs[0];
+  assert.equal(ledger.traceId, trace.traceId);
+  assert.equal(ledger.evidenceBytes, trace.evidenceBytes);
+  assert((await readdir(f.logDirectory)).includes(`review-${ledger.traceId}.json`));
 });
 
 test('invalid output logs a stable error code and bounds the event sample', async t => {
   const f = await fixture(t, Array.from({ length: 300 }, () => ({ type: 'text-delta', text: 'PRIVATE_ANSWER' })));
   const { run } = await f.mount();
-  assert.equal((await run(f.agent, 'automatic')).status, 'failed');
+  assert.deepEqual(await run(f.agent, 'automatic'), { status: 'failed', reason: 'reviewer_output_not_json', errorCode: 'reviewer_output_not_json', stage: 'validate' });
   const trace = await readTrace(f.logDirectory);
+  const ledger = JSON.parse(await readFile(join(f.directory, 'governance.json'), 'utf8')).runs[0];
+  assert.equal(ledger.errorCode, trace.errorCode);
+  assert.equal(ledger.stage, trace.stage);
   assert.equal(trace.errorCode, 'reviewer_output_not_json');
   assert.equal(trace.stage, 'validate');
   assert.equal(trace.counts['text-delta'], 300);
@@ -100,7 +114,7 @@ test('structured replacement rejects a duplicate anchor without recording a draf
     evidence: [{ type: 'tool/result', seq: 0, uri, body: repeated, requestedUris: [uri] }],
   });
   const { run } = await f.mount();
-  assert.deepEqual(await run(f.agent, 'manual'), { status: 'failed', reason: 'reviewer_replacement_not_unique', stage: 'validate' });
+  assert.deepEqual(await run(f.agent, 'manual'), { status: 'failed', reason: 'reviewer_replacement_not_unique', errorCode: 'reviewer_replacement_not_unique', stage: 'validate' });
   assert.equal(await getShadow(f), undefined);
 });
 
@@ -114,7 +128,7 @@ test('newer incomplete read suppresses the older patch base and blocks its use',
     ], onRequest: value => { request = value; },
   });
   const { run } = await f.mount();
-  assert.deepEqual(await run(f.agent, 'manual'), { status: 'failed', reason: 'reviewer_stale_base', stage: 'validate' });
+  assert.deepEqual(await run(f.agent, 'manual'), { status: 'failed', reason: 'reviewer_stale_base', errorCode: 'reviewer_stale_base', stage: 'validate' });
   assert.deepEqual(request.bases, []);
   assert.equal(await getShadow(f), undefined);
 });
@@ -127,26 +141,36 @@ test('manual review builds a canonical create diff from Markdown and a descripti
   assert.equal(applyCreateDiff((await getShadow(f)).diff, uri), '---\nname: demo\ndescription: "Check: results"\n---\n\n## Procedure\n\nVerify the result.\n');
 });
 
-test('a failed validation can be retried manually after remount and yields a diagnostic code', async t => {
+test('failed validation throttles manual and automatic retries across restart without consuming evidence', async t => {
   let attempt = 0;
   const f = await fixture(t, () => ++attempt === 1
-    ? answer({ action: 'create', uri, reason: 'Reproduce', diff: 'invalid diff' }) : mixed);
+    ? answer({ action: 'create', uri, reason: 'Reproduce', diff: 'old operation' }) : mixed, { settings: { cooldownMs: 0 } });
   const first = await f.mount();
-  assert.deepEqual(await first.run(f.agent, 'manual'), { status: 'failed', reason: 'invalid_create_diff', stage: 'validate' });
-  assert.equal((await readTrace(f.logDirectory)).errorCode, 'invalid_create_diff');
+  assert.deepEqual(await first.run(f.agent, 'automatic'), { status: 'failed', reason: 'reviewer_operation_extra_field', errorCode: 'reviewer_operation_extra_field', stage: 'validate' });
+  assert.equal((await readTrace(f.logDirectory)).errorCode, 'reviewer_operation_extra_field');
   const remounted = await f.mount();
-  assert.deepEqual(await remounted.run(f.agent, 'manual'), { status: 'no_change' });
-  assert.deepEqual(await remounted.run(f.agent, 'manual'), { status: 'deduped' });
+  assert.equal((await remounted.run(f.agent, 'manual')).status, 'cooldown');
+  assert.equal((await remounted.run(f.agent, 'automatic')).status, 'cooldown');
+  assert.equal(attempt, 1);
+  const path = join(f.directory, 'governance.json');
+  const stored = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(stored.runs.length, 1);
+  stored.runs[0].finishedAt = new Date(Date.now() - 6 * 60_000).toISOString();
+  await writeFile(path, JSON.stringify(stored));
+  const afterCooldown = await f.mount();
+  assert.deepEqual(await afterCooldown.run(f.agent, 'manual'), { status: 'no_change' });
+  assert.deepEqual(await afterCooldown.run(f.agent, 'manual'), { status: 'deduped' });
 });
 
 test('an unavailable review model is recorded and the same evidence remains retryable', async t => {
-  const f = await fixture(t, mixed);
+  const f = await fixture(t, mixed, { settings: { provider: '', model: '' }, onRequest: () => assert.fail('conversation route must not be used') });
   const { run } = await f.mount();
-  assert.deepEqual(await run({ session: f.agent.session }, 'manual'), { status: 'review_model_unavailable' });
-  const persisted = JSON.parse(await readFile(join(f.directory, 'governance.json'), 'utf8'));
+  assert.deepEqual(await run(f.agent, 'manual'), { status: 'review_model_unavailable' });
+  assert.deepEqual(await run(f.agent, 'automatic'), { status: 'review_model_unavailable' });
+  const path = join(f.directory, 'governance.json');
+  const persisted = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(persisted.runs.length, 1);
   assert.equal(persisted.runs[0]?.status, 'review_model_unavailable');
-  const { run: retry } = await f.mount();
-  assert.deepEqual(await retry(f.agent, 'manual'), { status: 'no_change' });
 });
 
 test('a review interrupted by a settings change remains retryable after remount', async t => {
@@ -159,6 +183,56 @@ test('a review interrupted by a settings change remains retryable after remount'
   await writeFile(path, JSON.stringify(persisted));
   const { run: retry } = await f.mount();
   assert.deepEqual(await retry(f.agent, 'manual'), { status: 'no_change' });
+});
+
+test('replays verbatim actual GPT-6.1 Terra output through stream, validation, compilation and submission', async t => {
+  const raw = await readFile(new URL('./fixtures/reviewer-gpt-6.1-terra-approve.json', import.meta.url), 'utf8');
+  const capturedUri = 'viking://user/fixture/skills/check/SKILL.md';
+  const capturedBase = '---\nname: check\ndescription: Demo\n---\nRun the smoke test.\nRecord the results.\n';
+  const f = await fixture(t, [{ type: 'text-delta', text: raw }, { type: 'finish', reason: { kind: 'stop' } }], {
+    events: [{ type: 'tool/result', seq: 1, text: 'Smoke script exited 1 but the surrounding pipeline returned 0.' },
+      { type: 'user/message', seq: 2, text: 'Skill correction: replace Run the smoke test. with Run the smoke test and verify its exit status. We verified that a successful pipeline can mask a failing script.' }],
+    evidence: [{ type: 'tool/result', seq: 1, uri: capturedUri, body: capturedBase, requestedUris: [capturedUri] }],
+  });
+  const { run } = await f.mount();
+  const outcome = await run(f.agent, 'manual');
+  assert.equal(outcome.status, 'shadow', JSON.stringify(outcome));
+  const { diff } = await getShadow(f);
+  assert.equal(applySkillDiff(capturedBase, diff, capturedUri), capturedBase.replace('Run the smoke test.', 'Run the smoke test and verify its exit status.'));
+});
+
+test('configured deadline and caller cancellation record distinct outcomes', async t => {
+  const hold = async function* () { await new Promise(resolve => setTimeout(resolve, 80)); };
+  const timed = await fixture(t, hold, { settings: { reviewTimeoutMs: 10 } });
+  const { run } = await timed.mount();
+  assert.deepEqual(await run(timed.agent, 'manual'), { status: 'timed_out', reason: 'TimeoutError', errorCode: 'TimeoutError', stage: 'stream' });
+  assert.equal((await run(timed.agent, 'manual')).status, 'cooldown');
+  assert.equal((await readTrace(timed.logDirectory)).status, 'timed_out');
+  const cancel = new AbortController();
+  const stopped = await fixture(t, hold, { onRequest: () => queueMicrotask(() => cancel.abort()) });
+  const { run: cancelledRun } = await stopped.mount();
+  assert.deepEqual(await cancelledRun(stopped.agent, 'manual', cancel.signal), { status: 'cancelled', reason: 'AbortError', errorCode: 'AbortError', stage: 'stream' });
+  assert.equal((await readTrace(stopped.logDirectory)).status, 'cancelled');
+});
+
+test('manual review does not enter the model stream when its session is running', async t => {
+  const f = await fixture(t, mixed, { onRequest: () => assert.fail('busy review requested a model') });
+  const { run } = await f.mount();
+  assert.deepEqual(await run({ ...f.agent, status: 'running' }, 'manual'), { status: 'review_source_busy' });
+  await assert.rejects(readFile(join(f.directory, 'governance.json')), { code: 'ENOENT' });
+});
+
+test('manual review waits for an active session sharing the configured provider', async t => {
+  const active = { status: 'running', model: { current: () => ({ provider: 'fixture-provider' }) } };
+  let modelCalls = 0;
+  const f = await fixture(t, mixed, { agents: [active], onRequest: () => { modelCalls++; } });
+  const { run } = await f.mount();
+  assert.deepEqual(await run(f.agent, 'manual'), { status: 'review_source_busy' });
+  assert.equal(modelCalls, 0);
+  await assert.rejects(readFile(join(f.directory, 'governance.json')), { code: 'ENOENT' });
+  active.status = 'idle';
+  assert.deepEqual(await run(f.agent, 'manual'), { status: 'no_change' });
+  assert.equal(modelCalls, 1);
 });
 
 test('startup prunes expired traces and caps count while preserving unrelated files', async t => {

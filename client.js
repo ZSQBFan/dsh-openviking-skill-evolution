@@ -7,11 +7,26 @@ window.__ModuleLoader__.load({
     const endpoint = `api/${ns}/dashboard`;
     const proposalActions = ['preview', 'approve', 'reject', 'rollback'];
     const skillActions = ['adopt', 'archive', 'restore'];
-    const countFields = ['maxTurns', 'maxToolCalls', 'maxFailures', 'cooldownMs'];
+    const numericFields = {
+      maxTurns: { scale: 1, min: 1, max: 1000 },
+      maxToolCalls: { scale: 1, min: 1, max: 1000 },
+      maxFailures: { scale: 1, min: 1, max: 1000 },
+      maxDurationMs: { label: 'durationMinutes', scale: 60_000, min: 1, max: 604_800_000 },
+      reviewTimeoutMs: { label: 'reviewTimeoutSeconds', scale: 1000, min: 1, max: 604_800_000 },
+      cooldownMs: { label: 'cooldownMinutes', scale: 60_000, min: 0, max: 604_800_000 },
+    };
+    const settingsLabels = { provider: 'reviewProvider', model: 'reviewModel' };
     const textFields = ['provider', 'model', 'correctionWords'];
+    const dateFields = new Set(['at', 'createdAt', 'finishedAt', 'startedAt', 'updatedAt', 'lastRun', 'nextRun', 'nextScan', 'lastUsed', 'retryAt']);
     const modeHelp = { auto: 'autoHelp', approval: 'approvalHelp', shadow: 'shadowHelp', off: 'offHelp' };
     const dictionaries = {
       en: {
+        durationMinutes: 'Review trigger duration (minutes)', reviewTimeoutSeconds: 'Model review timeout (seconds)',
+        reviewProvider: 'Review provider ID', reviewModel: 'Review model ID', routeRequired: 'Enter both IDs to enable model-based reviews.',
+        older: 'Older entries', createdAt: 'Created', startedAt: 'Started', finishedAt: 'Finished', retryAt: 'Retry after', stage: 'Stage', errorCode: 'Error code',
+        timed_out: 'Review timed out', review_source_busy: 'The source session is still running.',
+        cooldown: 'The review is in cooldown.', retry_blocked: 'Retry blocked by the review retry policy.',
+        review_model_unavailable: 'The configured review provider or model is unavailable.',
         title: 'Skill evolution', subtitle: 'OpenViking · Review and lifecycle', refresh: 'Refresh', run: 'Run review',
         loading: 'Loading dashboard…', refreshing: 'Refreshing dashboard…', working: 'Working…', overview: 'Overview', history: 'Run history',
         proposals: 'Proposals', curatorTitle: 'Curator', settingsTitle: 'Settings', usage: 'Usage', memory: 'Memory',
@@ -44,11 +59,17 @@ window.__ModuleLoader__.load({
         provider: 'Provider', model: 'Model', peer: 'Peer', available: 'Available', unavailableStatus: 'Unavailable',
         maxTurns: 'Turn limit', maxToolCalls: 'Tool-call limit', maxFailures: 'Failure limit', cooldownMs: 'Cooldown (ms)',
         correctionWords: 'Correction phrases (one per line)', curatorScope: 'Lifecycle actions apply to private skills managed by this plugin.',
-        metric: 'Metric', value: 'Value', advanced: 'Advanced settings', nextScan: 'Next check', connection: 'OpenViking connection', reuse: 'Uses the account configured in OpenViking Memory.', configuredWriter: 'Uses the configured OpenViking connection.', localDrafts: 'Drafts stay on this device. Connect OpenViking Memory to apply updates.', modelDefault: 'Leave both model fields blank to use the current conversation model.', modeHelp: 'Choose what happens when DSH learns an improvement to a skill.', cooldownMinutes: 'Minimum time between reviews (minutes)',
+        metric: 'Metric', value: 'Value', advanced: 'Advanced settings', nextScan: 'Next check', connection: 'OpenViking connection', reuse: 'Uses the account configured in OpenViking Memory.', configuredWriter: 'Uses the configured OpenViking connection.', localDrafts: 'Drafts stay on this device. Connect OpenViking Memory to apply updates.', modelSelection: 'Use the exact provider and model IDs from DSH’s model settings. Leave both empty to pause model-based reviews.', modeHelp: 'Choose what happens when DSH learns an improvement to a skill.', cooldownMinutes: 'Minimum time between reviews (minutes)',
          effectiveMode: 'Current behavior', autoHelp: 'Apply improvements to your private skills automatically.',
          approvalHelp: 'Show each improvement for your approval before updating.', shadowHelp: 'Keep suggestions on this device for you to inspect.', offHelp: 'Pause skill reviews and learning.',
       },
       zh: {
+        durationMinutes: '复盘触发时长（分钟）', reviewTimeoutSeconds: '模型复盘超时（秒）',
+        reviewProvider: '复盘提供商 ID', reviewModel: '复盘模型 ID', routeRequired: '填写提供商和模型两个 ID 后，才会运行模型复盘。',
+        older: '较早的记录', createdAt: '创建时间', startedAt: '开始时间', finishedAt: '完成时间', retryAt: '最早重试时间', stage: '阶段', errorCode: '错误代码',
+        timed_out: '复盘超时', review_source_busy: '来源会话仍在运行。',
+        cooldown: '复盘仍在冷却期。', retry_blocked: '当前复盘记录受重试策略限制。',
+        review_model_unavailable: '配置的复盘提供商或模型不可用。',
         title: '技能演进', subtitle: 'OpenViking · 复盘与生命周期', refresh: '刷新', run: '运行复盘',
         loading: '正在加载仪表板…', refreshing: '正在刷新仪表板…', working: '正在处理…', overview: '概览', history: '运行历史',
         proposals: '提案', curatorTitle: '技能治理', settingsTitle: '设置', usage: '用量', memory: '记忆',
@@ -80,7 +101,7 @@ window.__ModuleLoader__.load({
         provider: '提供商', model: '模型', peer: '项目记忆空间', available: '可用', unavailableStatus: '不可用',
         maxTurns: '轮次上限', maxToolCalls: '工具调用上限', maxFailures: '失败次数上限', cooldownMs: '冷却时间（毫秒）',
         correctionWords: '纠正短语（每行一个）', curatorScope: '生命周期操作仅适用于此插件纳管的私有技能。',
-        metric: '指标', value: '数值', advanced: '高级设置', nextScan: '下次检查', connection: 'OpenViking 连接', reuse: '沿用 OpenViking 记忆插件中已配置的账号。', configuredWriter: '使用已配置的 OpenViking 连接。', localDrafts: '改进会保存在本机。连接 OpenViking 记忆插件后，可将改进写回技能库。', modelDefault: '提供商和模型留空时，沿用当前会话的模型。', modeHelp: '选择 DSH 学到值得保留的经验后，如何更新技能。', cooldownMinutes: '自动复盘最短间隔（分钟）',
+        metric: '指标', value: '数值', advanced: '高级设置', nextScan: '下次检查', connection: 'OpenViking 连接', reuse: '沿用 OpenViking 记忆插件中已配置的账号。', configuredWriter: '使用已配置的 OpenViking 连接。', localDrafts: '改进会保存在本机。连接 OpenViking 记忆插件后，可将改进写回技能库。', modelSelection: '请填写 DSH 模型设置中的确切提供商 ID 和模型 ID。两项均留空可暂停模型复盘。', modeHelp: '选择 DSH 学到值得保留的经验后，如何更新技能。', cooldownMinutes: '自动复盘最短间隔（分钟）',
          effectiveMode: '当前实际行为', autoHelp: '符合条件的改进会自动写入你的私有技能，并保留可恢复的版本。',
          approvalHelp: '先向你展示改进，确认后才更新技能。', shadowHelp: '把改进保存在本机，供你查看。', offHelp: '暂停技能复盘和学习。',
       },
@@ -122,9 +143,27 @@ window.__ModuleLoader__.load({
       return h('section', { className: 'ove-card' }, h('h2', null, title), children);
     }
 
+    function localDate(value) {
+      if (typeof value !== 'string' && typeof value !== 'number') return value;
+      const date = new Date(value);
+      return Number.isFinite(date.getTime()) ? date.toLocaleString() : value;
+    }
+
+    function displayValue(key, value) {
+      return dateFields.has(key) ? localDate(value) : value;
+    }
+
+    function LatestList({ kind, items, renderItem, t }) {
+      const list = entries => h('ul', { className: 'ove-list' }, entries.map(renderItem));
+      const older = items.slice(3);
+      return h('div', { 'data-ove-list': kind }, list(items.slice(0, 3)),
+        older.length > 0 && h('details', { className: 'ove-more' },
+          h('summary', { onKeyDown: activateOnEnter }, `${t('older')} (${older.length})`), list(older)));
+    }
+
     function Value({ value, t }) {
       if (Array.isArray(value) || (value !== null && typeof value === 'object')) {
-        return h('pre', { className: 'ove-code' }, JSON.stringify(value, null, 2));
+        return h('pre', { className: 'ove-code' }, JSON.stringify(value, displayValue, 2));
       }
       if (value === null || value === undefined || value === '') return '—';
       if (typeof value === 'boolean') return t(value ? 'available' : 'unavailableStatus');
@@ -136,7 +175,7 @@ window.__ModuleLoader__.load({
       const entries = Object.entries(data ?? {}).filter(([, value]) => value !== null && value !== undefined);
       if (!entries.length) return h('p', { className: 'ove-muted' }, t('empty'));
       return h('dl', { className: 'ove-facts' }, entries.map(([key, value]) => h(React.Fragment, { key },
-        h('dt', null, known(t, key)), h('dd', null, h(Value, { value, t })))));
+        h('dt', null, known(t, key)), h('dd', null, h(Value, { value: displayValue(key, value), t })))));
     }
 
     function Usage({ data, t }) {
@@ -145,7 +184,7 @@ window.__ModuleLoader__.load({
       return h('table', { className: 'ove-usage' },
         h('thead', null, h('tr', null, h('th', { scope: 'col' }, t('metric')), h('th', { scope: 'col' }, t('value')))),
         h('tbody', null, entries.map(([key, value]) => h('tr', { key },
-          h('th', { scope: 'row' }, known(t, key)), h('td', null, h(Value, { value, t }))))));
+          h('th', { scope: 'row' }, known(t, key)), h('td', null, h(Value, { value: displayValue(key, value), t }))))));
     }
 
     function Diff({ preview, t }) {
@@ -272,15 +311,15 @@ window.__ModuleLoader__.load({
         event.preventDefault();
         if (!draft || settingsDisabled) return;
         const input = { ...draft };
-        for (const key of countFields) {
-          if (Object.hasOwn(input, key)) {
-            const value = key === 'cooldownMs' ? Math.round(Number(input[key]) * 60_000) : Number(input[key]);
-            if (String(input[key]).trim() === '' || !Number.isSafeInteger(value) || value < 0) {
-              setNotice({ error: 'badRequest' });
-              return;
-            }
-            input[key] = value;
+        for (const [key, { scale, min, max }] of Object.entries(numericFields)) {
+          if (!Object.hasOwn(input, key)) continue;
+          const number = Number(input[key]);
+          const value = scale === 1 ? number : Math.round(number * scale);
+          if (String(input[key]).trim() === '' || !Number.isSafeInteger(value) || value < min || value > max) {
+            setNotice({ error: 'badRequest' });
+            return;
           }
+          input[key] = value;
         }
         if (typeof input.correctionWords === 'string') input.correctionWords = input.correctionWords.split('\n').map(word => word.trim()).filter(Boolean);
         for (const key of ['provider', 'model']) if (typeof input[key] === 'string') input[key] = input[key].trim();
@@ -318,8 +357,10 @@ window.__ModuleLoader__.load({
         notice?.error && h('p', { role: 'alert', className: 'ove-message' }, t(notice.error)),
         notice && !notice.error && h('div', { className: 'ove-message', role: 'status' },
           h('strong', null, t('result')),
-          notice.action === 'run' && ['no_session', 'no_evidence', 'deduped', 'busy'].includes(notice.result?.status)
-            ? ` · ${t(notice.result.status)}`
+          notice.action === 'run' && notice.result?.status
+            ? h(React.Fragment, null, ` · ${known(t, notice.result.status)}`,
+              Object.keys(notice.result).some(key => key !== 'status') &&
+                h(Facts, { data: Object.fromEntries(Object.entries(notice.result).filter(([key]) => key !== 'status')), t }))
             : notice.result === null ? ` · ${t('actionComplete')}` : h(Value, { value: notice.result, t })),
         confirmation && h('section', { className: 'ove-message ove-controls', role: 'group', 'aria-label': t(confirmCopy[confirmation.action]) },
           h('span', null, t(confirmCopy[confirmation.action]), ' ', confirmation.input.id ?? confirmation.input.uri),
@@ -337,20 +378,19 @@ window.__ModuleLoader__.load({
               value: mode, disabled: settingsDisabled, onChange: event => changeSetting('mode', event.target.value),
             }, modes.map(option => h('option', { key: option.id, value: option.id }, known(t, option.id))))),
             h('details', { className: 'ove-advanced' }, h('summary', { onKeyDown: activateOnEnter }, t('advanced')),
-              h('p', { className: 'ove-muted' }, t('modelDefault')),
-              h('div', { className: 'ove-settings ove-settings-grid' }, [...countFields, ...textFields].map(key => {
-              const isCount = countFields.includes(key);
-              const isPhrases = key === 'correctionWords';
-              const minutes = key === 'cooldownMs';
-              const current = settings[key];
-              const value = draft?.[key] ?? (minutes && Number.isFinite(current) ? current / 60_000 : current) ?? '';
-              return h('label', { key }, t(minutes ? 'cooldownMinutes' : key), h(isPhrases ? 'textarea' : 'input', {
-                ...(isPhrases ? { rows: 3 } : { type: isCount ? 'number' : 'text' }),
-                ...(isCount ? { min: minutes ? 0 : 1, step: minutes ? 'any' : 1 } : {}),
-                value: Array.isArray(value) ? value.join('\n') : value,
-                disabled: settingsDisabled, onChange: event => changeSetting(key, event.target.value),
-              }));
-            }))),
+               h('p', { className: 'ove-muted' }, t('modelSelection')),
+               h('div', { className: 'ove-settings ove-settings-grid' }, [...Object.keys(numericFields), ...textFields].map(key => {
+                 const numeric = numericFields[key];
+                 const isPhrases = key === 'correctionWords';
+                 const current = settings[key];
+                 const value = draft?.[key] ?? (numeric && Number.isFinite(current) ? current / numeric.scale : current) ?? '';
+                 return h('label', { key }, t(numeric?.label ?? settingsLabels[key] ?? key), h(isPhrases ? 'textarea' : 'input', {
+                   ...(isPhrases ? { rows: 3 } : { type: numeric ? 'number' : 'text' }),
+                   ...(numeric ? { min: numeric.min / numeric.scale, max: numeric.max / numeric.scale, step: numeric.scale === 1 ? 1 : 'any' } : {}),
+                   value: Array.isArray(value) ? value.join('\n') : value,
+                   disabled: settingsDisabled, onChange: event => changeSetting(key, event.target.value),
+                 }));
+               }))),
             h('div', { className: 'ove-controls' }, h(Button, { type: 'submit', disabled: settingsDisabled || !draft }, t('settings'))))),
           h(Card, { title: t('overview') },
             h('div', { className: 'ove-controls' },
@@ -362,26 +402,30 @@ window.__ModuleLoader__.load({
               h(Button, { primary: true, disabled: !!busy || !canReview || !reviewSessionId || reviewRunning,
                 onClick: () => void run('run', { sessionId: reviewSessionId }) }, t('run'))),
             reviewHint && h('p', { className: 'ove-muted' }, t(reviewHint)),
+            settings.mode !== 'off' && (!settings.provider?.trim() || !settings.model?.trim()) &&
+              h('p', { className: 'ove-muted' }, t('routeRequired')),
             h(Facts, { t, data: Object.fromEntries(Object.entries(status).filter(([key]) => key !== 'state' && key !== 'status')) })),
-          h(Card, { title: t('proposals') }, proposals.length ? h('ul', { className: 'ove-list' }, proposals.map(item => h('li', { key: item.id },
+          h(Card, { title: t('proposals') }, proposals.length ? h(LatestList, { kind: 'proposals', items: proposals, t, renderItem: item => h('li', { key: item.id },
             h('div', { className: 'ove-row' }, h('div', null,
               h('strong', null, item.title ?? item.uri ?? item.id), ' ', h('span', { className: 'ove-status' }, h(Value, { value: item.status, t })),
+              item.createdAt != null && h('p', { className: 'ove-muted' }, localDate(item.createdAt)),
               item.summary && h('p', { className: 'ove-muted' }, item.summary), indexWarning(item)),
             h('div', { className: 'ove-controls' }, proposalActions.filter(action => enabled(action) && (!Array.isArray(item.actions) || item.actions.includes(action))).map(action => actionButton(action, { id: item.id })))),
             preview?.id === item.id && h('div', { className: 'ove-preview' },
               h('div', { className: 'ove-row' }, h('h3', null, t('preview')), h(Button, { onClick: () => setPreview(null) }, t('close'))),
               h(Diff, { preview: preview.value, t })),
-          ))) : h('p', { className: 'ove-muted' }, t('noProposals'))),
-          h(Card, { title: t('history') }, history.length ? h('ul', { className: 'ove-list' }, history.map((item, i) => h('li', { key: item.id ?? i },
-            h('details', null, h('summary', null, item.at ?? item.startedAt ?? item.id ?? '', ' ', h(Value, { value: item.status ?? item.state, t })), h(Facts, { data: item, t })),
-          ))) : h('p', { className: 'ove-muted' }, t('noHistory'))),
+          ) }) : h('p', { className: 'ove-muted' }, t('noProposals'))),
+          h(Card, { title: t('history') }, history.length ? h(LatestList, { kind: 'history', items: history, t, renderItem: (item, i) => h('li', { key: item.traceId ?? (item.id ?? '') + ':' + i },
+            h('details', null, h('summary', null, localDate(item.at ?? item.startedAt) ?? item.id ?? '', ' ',
+              h(Value, { value: item.status ?? item.state, t })), h(Facts, { data: item, t })),
+          ) }) : h('p', { className: 'ove-muted' }, t('noHistory'))),
           h(Card, { title: t('curatorTitle') },
             h('p', { className: 'ove-muted' }, t('curatorScope')),
             h('div', { className: 'ove-controls' }, enabled('curator') && actionButton('curator', {}), enabled('adopt') && h('form', {
               className: 'ove-controls', onSubmit: event => { event.preventDefault(); if (uri.trim()) void run('adopt', { uri: uri.trim() }); },
             }, h('label', null, t('uri'), ' ', h('input', { value: uri, onChange: event => setUri(event.target.value), disabled: !!busy })),
             h(Button, { type: 'submit', disabled: !!busy || !uri.trim() }, t('adopt')))),
-            Number.isFinite(curator.nextScan) && h('p', { className: 'ove-muted' }, `${t('nextScan')} · ${new Date(curator.nextScan).toLocaleString()}`),
+            curator.nextScan != null && h('p', { className: 'ove-muted' }, `${t('nextScan')} · ${localDate(curator.nextScan)}`),
             rows(curator.audit).length > 0 && h('details', null, h('summary', null, t('history')), h(Value, { value: curator.audit, t })),
             skillRows.length ? h('ul', { className: 'ove-list' }, skillRows.map(item => h('li', { className: 'ove-row', key: item.uri },
               h('div', null, h('strong', null, item.title ?? item.uri), ' ', h('span', { className: 'ove-status' }, h(Value, { value: item.status, t }))),
@@ -412,7 +456,9 @@ window.__ModuleLoader__.load({
       .ove-settings { display:grid; gap:10px; }
       .ove-settings-grid { margin-top:10px; grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr)); }
       .ove-settings label { display:grid; grid-template-rows:auto 1fr; align-content:start; min-width:0; }
-      .ove-advanced:not([open]) > :not(summary) { display:none; }
+      .ove-dashboard :is(.ove-advanced,.ove-more):not([open]) > :not(summary) { display:none; }
+      .ove-more { margin-top:8px; }
+      .ove-more[open] > summary { margin-bottom:8px; }
       .ove-advanced > p { margin-top:8px; }
       .ove-settings textarea { resize:vertical; }
       .ove-settings > .ove-controls { grid-column:1 / -1; }

@@ -2,20 +2,20 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { createApprovalService, saveState } from './approval.js';
+import { invalidReviewLimit, REVIEW_DEFAULTS } from './automatic-review.js';
 import { isSkillUri } from './evidence.js';
 import { createOpenVikingAdapter } from './ov-adapter.js';
+import { backfillReviewRuns, normalizeReviewRun } from './review-stream-log.js';
 
 const MODES = ['off', 'shadow', 'approval', 'auto'];
-const SETTING_FIELDS = ['mode', 'maxTurns', 'maxToolCalls', 'cooldownMs', 'maxFailures', 'correctionWords', 'provider', 'model'];
 const MAX_HISTORY = 200;
 const HEX = /^[a-f0-9]{64}$/;
-const settingsDefaults = { mode: 'auto', maxTurns: 10, maxToolCalls: 10, cooldownMs: 1_800_000,
-  maxFailures: 3, correctionWords: ['技能纠正', '技能经验', 'instead', 'actually', 'correction'], provider: '', model: '' };
+const settingsDefaults = { ...REVIEW_DEFAULTS, mode: 'auto',
+  correctionWords: ['技能纠正', '技能经验', 'instead', 'actually', 'correction'], provider: '', model: '' };
+const SETTING_FIELDS = Object.keys(settingsDefaults);
 
 function validSettings(input) {
-  return MODES.includes(input.mode) && ['maxTurns', 'maxToolCalls', 'maxFailures'].every(key =>
-    Number.isSafeInteger(input[key]) && input[key] >= 1 && input[key] <= 1000) &&
-    Number.isSafeInteger(input.cooldownMs) && input.cooldownMs >= 0 && input.cooldownMs <= 604_800_000 &&
+  return MODES.includes(input.mode) && !invalidReviewLimit(input) &&
     Array.isArray(input.correctionWords) && input.correctionWords.length <= 30 &&
     input.correctionWords.every(word => typeof word === 'string' && word.trim() && word.length <= 60) &&
     ['provider', 'model'].every(key => typeof input[key] === 'string' && input[key].length <= 120 && !/[\r\n]/.test(input[key]));
@@ -39,7 +39,19 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
     if (error.code !== 'ENOENT') throw error;
     state = { version: 1, owner, revision: 0, settings: initialSettings, runs: [], shadows: [] };
   }
-  if (state.version !== 1 || state.owner !== owner || !validSettings(state.settings)) throw Error('Invalid persisted governance state');
+  state.settings = {
+    maxDurationMs: initialSettings.maxDurationMs,
+    reviewTimeoutMs: initialSettings.reviewTimeoutMs,
+    ...state.settings,
+  };
+  if (state.version !== 1 || state.owner !== owner || !validSettings(state.settings) || !Array.isArray(state.runs)) {
+    throw Error('Invalid persisted governance state');
+  }
+  const runs = await backfillReviewRuns(directory, state.runs);
+  if (runs !== state.runs) {
+    state.runs = runs;
+    await saveState(directory, path, state);
+  }
   if (resolveConnection && state.revision === 0 && state.settings.mode === 'off') state.settings.mode = 'auto';
   const snapshotSettings = () => {
     const active = connection();
@@ -78,6 +90,9 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
     if (ledger.version !== 1 || !Array.isArray(ledger.records)) throw Error('Invalid approval ledger');
     return ledger.records.filter(record => service(record.proposal.uri, active));
   }
+  function approvalResult({ status, errorCode, diagnostic }) {
+    return { status, ...(diagnostic && { errorCode, diagnostic }) };
+  }
   async function submit(proposal, { revision, signal } = {}) {
     if (!HEX.test(proposal?.proposalId) || !isSkillUri(proposal?.uri)) return { status: 'no_change' };
     return mutate(async next => {
@@ -88,14 +103,14 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
       const target = config.effectiveMode === 'shadow' ? null : service(proposal.uri);
       if (!target) {
         if (!next.shadows.some(item => item.proposalId === proposal.proposalId))
-          next.shadows = [...next.shadows, proposal].slice(-MAX_HISTORY);
+          next.shadows = [...next.shadows, { ...proposal, createdAt: new Date().toISOString() }].slice(-MAX_HISTORY);
         return { status: 'shadow' };
       }
       const staged = await target.stage(proposal);
-      if (config.mode !== 'auto' || staged.status !== 'pending') return { status: staged.status };
+      if (config.mode !== 'auto' || staged.status !== 'pending') return approvalResult(staged);
       const voted = await target.approve({ id: proposal.proposalId, digest: staged.approvalDigest,
         sessionId: proposal.evidence.sessionId, signal });
-      return { status: voted.status };
+      return approvalResult(voted);
     });
   }
   return {
@@ -128,17 +143,25 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
         }) };
     },
     log(run) {
-      return mutate(next => { next.runs = [...next.runs, run].slice(-MAX_HISTORY); });
+      return mutate(next => { next.runs = [...next.runs, normalizeReviewRun(run)].slice(-MAX_HISTORY); });
     },
     history: () => structuredClone(state.runs).reverse(),
     async proposals() {
       const all = await records();
       const official = new Set(all.map(item => item.proposal.proposalId));
-      return [...all, ...state.shadows.filter(item => !official.has(item.proposalId)).map(proposal => ({ status: 'shadow', proposal }))]
+      const legacyTimes = new Map();
+      for (const run of state.runs) {
+        if (run.status === 'shadow' && run.proposalId && !legacyTimes.has(run.proposalId)) legacyTimes.set(run.proposalId, run.at);
+      }
+      const shadows = state.shadows.filter(item => !official.has(item.proposalId)).map(proposal => ({ status: 'shadow', proposal }));
+      const creationTime = value => Number.isFinite(Date.parse(value)) ? Date.parse(value) : Number.MIN_SAFE_INTEGER;
+      return [...all, ...shadows].reverse()
         .map(({ status, proposal, history }) => ({ id: proposal.proposalId, uri: proposal.uri, status, summary: proposal.reason,
           sessionId: proposal.evidence.sessionId, action: proposal.action, history,
+          createdAt: history?.[0]?.at ?? proposal.createdAt ?? legacyTimes.get(proposal.proposalId),
           actions: ['preview', ...(status === 'pending' ? ['approve', 'reject'] : []),
-            ...(status === 'applied' || status === 'restoring' ? ['rollback'] : []), ...(status === 'applying' ? ['approve'] : [])] })).reverse();
+            ...(status === 'applied' || status === 'restoring' ? ['rollback'] : []), ...(status === 'applying' ? ['approve'] : [])] }))
+        .sort((left, right) => creationTime(right.createdAt) - creationTime(left.createdAt));
     },
     async preview(id) {
       if (!HEX.test(id)) return { status: 'invalid_id' };
@@ -155,7 +178,7 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
         if (!record) return { status: 'missing' };
         const { proposal, approvalDigest: digest } = record;
         const result = await service(proposal.uri, active)[action]({ id, digest, sessionId: proposal.evidence.sessionId, signal });
-        return { status: result.status, uri: proposal.uri, action: proposal.action };
+        return { ...approvalResult(result), uri: proposal.uri, action: proposal.action };
       });
     },
     get canWrite() { return Boolean(connection()?.writer); },

@@ -14,6 +14,7 @@ const chrome = process.env.CHROME_BIN ?? '/Applications/Google Chrome.app/Conten
 const path = '/api/dsh-openviking-skill-evolution/dashboard';
 const uri = 'viking://user/fixture/skills/demo/SKILL.md';
 const name = 'dsh-openviking-skill-evolution';
+const fixtureTime = '2026-11-20T18:30:47.000Z';
 const root = await mkdtemp(join(tmpdir(), 'dsh-dashboard-smoke-'));
 const children = [];
 let socket;
@@ -76,13 +77,21 @@ export async function apply(ctx) {
     await ctx.sessions.flush(agent.session);
   }
   const state = {
-    status: { state: 'idle' }, settings: { mode: 'auto', modes: ['auto', 'shadow', 'off'], revision: 1, effectiveMode: 'shadow', writeConnection: 'unavailable' },
-    history: [], proposals: [{ id: 'fixture-proposal', uri, status: 'pending', summary: 'Tighten instructions', actions: ['preview', 'approve'] }],
-    usage: { inputTokens: 41 }, curator: { skills: [] }, memory: { status: 'ready' },
+    status: { state: 'idle', lastRun: ${JSON.stringify(fixtureTime)} }, settings: { mode: 'auto', modes: ['auto', 'shadow', 'off'], revision: 1, effectiveMode: 'shadow', writeConnection: 'unavailable', maxDurationMs: 1800000, reviewTimeoutMs: 300000, provider: '', model: '' },
+    history: [], proposals: [{ id: 'fixture-proposal', uri, status: 'pending', summary: 'Tighten instructions', createdAt: ${JSON.stringify(fixtureTime)}, actions: ['preview', 'approve'] },
+      ...['fixture-p2', 'fixture-p3', 'fixture-p4', 'fixture-p5'].map(id => ({ id, title: id, status: 'shadow' }))],
+    usage: { inputTokens: 41, skills: [{ uri, count: 2, lastUsed: Date.parse(${JSON.stringify(fixtureTime)}) }] },
+    curator: { skills: [], nextScan: Date.parse(${JSON.stringify(fixtureTime)}), audit: [{ at: Date.parse(${JSON.stringify(fixtureTime)}), status: 'ready' }] }, memory: { status: 'ready' },
   };
   const result = status => ({ status });
   const actions = {
-    run: ({ sessionId }) => { state.history.push({ id: sessionId, status: 'ready' }); return result('ready'); },
+    run: ({ sessionId }) => {
+      const run = sessionId === 'fixture-timeout'
+        ? { id: sessionId, at: ${JSON.stringify(fixtureTime)}, status: 'timed_out', stage: 'stream', errorCode: 'TimeoutError', reason: 'timeout fixture', retryAt: ${JSON.stringify(fixtureTime)} }
+        : { id: sessionId, status: 'ready' };
+      state.history.unshift(run);
+      return run;
+    },
     settings: ({ revision, ...patch }) => {
       if (revision !== state.settings.revision) throw Error('stale settings');
       state.settings = { ...state.settings, ...patch, revision: revision + 1 };
@@ -205,6 +214,7 @@ try {
     if (reply.exceptionDetails) throw Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
     return reply.result.value;
   };
+  await cdp('Emulation.setTimezoneOverride', { timezoneId: 'Asia/Shanghai' });
   await cdp('Page.navigate', { url: loginUrl });
   const press = async (label, scope = 'document') => retry(() => evaluate(`(() => {
     const button = [...${scope}.querySelectorAll('button,[role=button],[role=tab],[role=menuitem]')].find(b => !b.disabled && b.getClientRects().length && [b.textContent.trim(), b.getAttribute('aria-label'), b.title].includes(${JSON.stringify(label)}));
@@ -271,7 +281,35 @@ try {
   await fill('会话 ID', '  fixture-newest  ');
   await inPanel('运行复盘');
   await text('fixture-newest');
-  assert.deepEqual((await getHistory()).map(item => item.id), ['fixture-current', 'fixture-newest']);
+  assert.deepEqual((await getHistory()).map(item => item.id), ['fixture-newest', 'fixture-current']);
+  const latestRows = kind => `${panel}.querySelector('[data-ove-list="${kind}"]')`;
+  const visible = node => evaluate(`[...${node}.querySelectorAll('li')].filter(item => item.getClientRects().length).length`);
+  assert.equal(await visible(latestRows('proposals')), 3);
+  assert.equal(await evaluate(`${latestRows('proposals')}.innerText.includes('fixture-p4')`), false);
+  await evaluate(`${latestRows('proposals')}.querySelector('summary').click()`);
+  assert.equal(await visible(latestRows('proposals')), 5);
+  await evaluate(`${latestRows('proposals')}.querySelector('summary').click()`);
+  for (const sessionId of ['fixture-run-3', 'fixture-run-4', 'fixture-timeout']) {
+    await fill('会话 ID', sessionId);
+    await inPanel('运行复盘');
+    await retry(async () => (await getHistory())[0]?.id === sessionId, `recorded ${sessionId}`);
+  }
+  await text('复盘超时');
+  await text('TimeoutError');
+  const localTime = await evaluate(`new Date(${JSON.stringify(fixtureTime)}).toLocaleString()`);
+  const firstRun = `${latestRows('history')}.querySelector('li')`;
+  await retry(() => evaluate(`${firstRun}.querySelector('summary').innerText.includes(${JSON.stringify(localTime)})`), 'local time in the latest run summary');
+  await evaluate(`${firstRun}.querySelector('summary').click()`);
+  for (const value of ['复盘超时', '错误代码', 'TimeoutError', '阶段', 'stream', 'timeout fixture', '最早重试时间']) {
+    assert.equal(await evaluate(`${firstRun}.innerText.includes(${JSON.stringify(value)})`), true);
+  }
+  assert.equal(await evaluate(`${panel}.innerText.includes(${JSON.stringify(fixtureTime)})`), false);
+  assert.equal(await visible(latestRows('history')), 3);
+  const runGroups = `${latestRows('history')}.querySelector('details.ove-more')`;
+  assert.equal(await evaluate(`${runGroups}.open`), false);
+  await evaluate(`${runGroups}.querySelector('summary').click()`);
+  assert.equal(await visible(latestRows('history')), 5);
+  assert.equal((await getHistory())[0].at, fixtureTime);
   await evaluate(`[...${panel}.querySelectorAll('button')].find(button => button.textContent === '预览').focus()`);
   assert.equal(await evaluate(`document.activeElement.textContent`), '预览');
   await enter();
@@ -314,8 +352,12 @@ try {
   await fill('工具调用上限', '15');
   await fill('失败次数上限', '4');
   await fill('自动复盘最短间隔（分钟）', '2.5');
-  await fill('提供商', 'fixture-provider');
-  await fill('模型', 'fixture-model');
+  assert.equal(await evaluate(`[...${panel}.querySelectorAll('.ove-advanced input')].find(input => input.parentElement.textContent.includes('复盘触发时长（分钟）')).value`), '30');
+  assert.equal(await evaluate(`[...${panel}.querySelectorAll('.ove-advanced input')].find(input => input.parentElement.textContent.includes('模型复盘超时（秒）')).value`), '300');
+  await fill('复盘触发时长（分钟）', '1.5');
+  await fill('模型复盘超时（秒）', '45.5');
+  await fill('复盘提供商 ID', 'fixture-provider');
+  await fill('复盘模型 ID', 'fixture-model');
   await fill('纠正短语（每行一个）', 'before\nafter');
   await inPanel('保存设置');
   await inPanel('运行治理');
@@ -330,7 +372,7 @@ try {
   const persisted = await (await fetch(origin + path, { headers: { Cookie: cookie } })).json();
   assert.deepEqual(persisted.data.settings, {
     mode: 'shadow', modes: ['auto', 'shadow', 'off'], revision: 2, effectiveMode: 'shadow', writeConnection: 'unavailable',
-    maxTurns: 12, maxToolCalls: 15, maxFailures: 4, cooldownMs: 150000,
+    maxTurns: 12, maxToolCalls: 15, maxFailures: 4, cooldownMs: 150000, maxDurationMs: 90_000, reviewTimeoutMs: 45_500,
     provider: 'fixture-provider', model: 'fixture-model', correctionWords: ['before', 'after'],
   });
   assert.deepEqual(exceptions, []);

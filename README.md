@@ -30,7 +30,7 @@
 
 例如，排查构建失败后，可以对 Agent 说“把刚才验证通过的检查步骤记录成技能，下次发布前按这个顺序检查”。也可用 `/skill-review` 立即复盘当前会话。提案、差异和回滚入口都在「技能演进」面板。
 
-通常可以保留默认设置。「高级设置」可调整复盘频率和所用模型。模型设置留空时，沿用当前会话的模型。
+「高级设置」可调整复盘触发阈值、单次审查超时和复盘模型。时长触发阈值默认 30 分钟，单次超时默认 300 秒。模型复盘需要同时填写 Provider 和模型，留空时仍可处理有明确证据的确定性修订。提案和运行历史默认各显示最近三条，展开可查看其余记录。面板时间使用当前系统时区。
 
 ## 数据与使用范围
 
@@ -42,6 +42,6 @@
 
 ## 开发与反馈
 
-使用 Node.js 22 或以上版本运行 `npm test` 和 `npm run test:release`。反馈时请附上 DSH 版本、系统和复现步骤，并先移除日志中的私人信息。详见 [Issues](https://github.com/ZSQBFan/dsh-openviking-skill-evolution/issues) 和 [更新日志](CHANGELOG.md)。
+使用 Node.js 22 或以上版本运行 `npm test` 和 `npm run test:release`。发版前，同一候选包还需通过隔离 DSH Web 的审批门禁，见 [发布验证](https://github.com/ZSQBFan/dsh-openviking-skill-evolution/blob/main/docs/release-verification.md)。反馈时请附上 DSH 版本、系统和复现步骤，并先移除日志中的私人信息。详见 [Issues](https://github.com/ZSQBFan/dsh-openviking-skill-evolution/issues) 和 [更新日志](CHANGELOG.md)。
 
 [MIT](LICENSE) · zsqbfan

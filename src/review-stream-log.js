@@ -1,32 +1,87 @@
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, readdir, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { isDeepStrictEqual } from 'node:util';
+import { normalizeReviewErrorCode } from './review-errors.js';
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FILES = 256;
 const MAX_EVENTS = 128;
-const LOG_FILE = /^review-[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\.json$/;
+const LOG_FILE = /^review-([\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})\.json$/;
+const STAGES = new Set(['stream', 'validate', 'submit']);
+const INTERRUPTIBLE_STATUSES = new Set(['failed', 'cancelled', 'timed_out']);
 const TYPES = new Set(['block-start', 'block-end', 'text', 'text-delta', 'reasoning-delta', 'tool-call-delta', 'usage', 'finish', 'error']);
 const FINISH_REASONS = new Set(['stop', 'end-turn', 'length', 'tool-use', 'tool-calls', 'content-filter', 'cancelled', 'aborted', 'error', 'context-overflow', 'completed']);
-const REVIEW_ERRORS = new Set([
-  'reviewer_stream_failed', 'reviewer_output_not_json', 'reviewer_output_not_object',
-  'reviewer_output_extra_field', 'reviewer_decision_invalid', 'reviewer_reason_required',
-  'reviewer_evidence_required', 'reviewer_evidence_invalid', 'reviewer_proposal_invalid',
-  'reviewer_evidence_uncommitted', 'reviewer_learning_evidence_required', 'reviewer_create_scope',
-  'reviewer_stale_base', 'reviewer_operation_invalid', 'reviewer_operation_incomplete',
-  'reviewer_patch_base_required', 'reviewer_create_base_invalid', 'reviewer_operation_evidence_required',
-  'invalid_skill_diff', 'skill_diff_base_mismatch', 'invalid_create_diff', 'invalid_create_frontmatter',
-  'invalid_attachment_operations', 'invalid_attachment_operation', 'invalid_attachment_path', 'invalid_attachment_write',
-  'reviewer_replacement_invalid', 'reviewer_replacement_not_unique', 'reviewer_create_content_invalid',
-]);
-const LLM_ERRORS = new Set(['MALFORMED_RESPONSE', 'STREAM_CLOSED', 'RATE_LIMITED', 'AUTHENTICATION_FAILED', 'CONTEXT_OVERFLOW']);
+export { reviewStreamErrorCode } from './review-errors.js';
 
-export function reviewStreamErrorCode(error, signal) {
-  if (signal.aborted) return signal.reason?.name === 'TimeoutError' ? 'TimeoutError' : 'AbortError';
-  if (REVIEW_ERRORS.has(error?.message)) return error.message;
-  if (LLM_ERRORS.has(error?.code)) return error.code;
-  return 'unexpected_error';
+function traceKey(row) {
+  const fields = [row?.at, row?.sessionId, row?.source];
+  if (fields.every(value => typeof value === 'string' && value.length > 0)) return JSON.stringify(fields);
+}
+
+export function normalizeReviewRun(row, trace) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+  const next = { ...row };
+  if (trace) {
+    next.traceId ??= trace.traceId;
+    if (STAGES.has(trace.stage)) next.stage ??= trace.stage;
+  }
+  const specific = normalizeReviewErrorCode(row.errorCode) ?? normalizeReviewErrorCode(row.reason) ??
+    normalizeReviewErrorCode(trace?.errorCode);
+  if (specific) {
+    next.errorCode = specific;
+    if (next.errorAttribution === 'unavailable') delete next.errorAttribution;
+    if (INTERRUPTIBLE_STATUSES.has(row.status)) {
+      if (specific === 'TimeoutError') next.status = 'timed_out';
+      if (specific === 'AbortError') next.status = 'cancelled';
+    }
+  } else {
+    if (next.errorCode !== 'unexpected_error') delete next.errorCode;
+    if (row.reason === 'Error' || row.reason === 'unexpected_error' ||
+        row.errorCode === 'unexpected_error' || row.status === 'failed') {
+      next.errorAttribution = 'unavailable';
+    }
+  }
+  return isDeepStrictEqual(row, next) ? row : next;
+}
+
+async function readTraceIndex(directory, keys) {
+  const path = join(directory, 'review-stream');
+  const traces = new Map();
+  const dir = await lstat(path).catch(() => undefined);
+  if (!dir?.isDirectory()) return traces;
+  for (const entry of await readdir(path, { withFileTypes: true }).catch(() => [])) {
+    const match = LOG_FILE.exec(entry.name);
+    if (!entry.isFile() || !match) continue;
+    let record;
+    try { record = JSON.parse(await readFile(join(path, entry.name), 'utf8')); }
+    catch { continue; }
+    const traceId = match[1];
+    if (record?.version !== 1 || (record.traceId !== undefined && record.traceId !== traceId)) continue;
+    const key = traceKey(record);
+    if (!keys.has(key)) continue;
+    traces.set(key, traces.has(key) ? null : { ...record, traceId });
+  }
+  return traces;
+}
+
+export async function backfillReviewRuns(directory, runs) {
+  const keys = runs.map(traceKey);
+  const uniqueKeys = new Set();
+  const duplicateKeys = new Set();
+  for (const key of keys) {
+    if (key === undefined) continue;
+    if (uniqueKeys.has(key)) duplicateKeys.add(key);
+    else uniqueKeys.add(key);
+  }
+  for (const key of duplicateKeys) uniqueKeys.delete(key);
+  const traces = uniqueKeys.size ? await readTraceIndex(directory, uniqueKeys) : new Map();
+  const next = runs.map((row, index) => {
+    const trace = traces.get(keys[index]);
+    return normalizeReviewRun(row, trace && (row.traceId == null || row.traceId === trace.traceId) ? trace : undefined);
+  });
+  return next.some((row, index) => row !== runs[index]) ? next : runs;
 }
 
 export function createReviewStreamTrace() {
@@ -93,10 +148,12 @@ export function createReviewStreamLog(directory) {
   return {
     prune: () => serialize(() => prune(MAX_FILES)),
     write: record => serialize(async () => {
+      const traceId = record.traceId ?? randomUUID();
+      const name = `review-${traceId}.json`;
+      if (typeof traceId !== 'string' || !LOG_FILE.test(name)) throw Error('review_trace_id_invalid');
       await mkdir(path, { recursive: true, mode: 0o700 });
       await prune(MAX_FILES - 1);
-      const file = join(path, `review-${randomUUID()}.json`);
-      await writeFile(file, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: 'wx' });
+      await writeFile(join(path, name), `${JSON.stringify(record)}\n`, { mode: 0o600, flag: 'wx' });
     }),
   };
 }

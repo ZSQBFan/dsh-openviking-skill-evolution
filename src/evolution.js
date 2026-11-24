@@ -1,9 +1,10 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { skillManageTool } from './skill-tool.js';
 import { automaticReviewProjection, buildEvidencePacket, createDshReviewAdapter, parseReviewerOutput, projectReviewPolicy, reviewerOperationToProposal } from './automatic-review.js';
 import { createCurator } from './curator.js';
 import { createReviewStreamLog, createReviewStreamTrace, reviewStreamErrorCode } from './review-stream-log.js';
+import { applicableAttempt, consumesReviewEvidence, isFailureOutcome, retryReviewDecision } from './review-retry.js';
 import { mountDashboard } from './dashboard.js';
 import { isSkillUri } from './evidence.js';
 import { createGovernance } from './governance.js';
@@ -30,17 +31,22 @@ function latestRead(state, uri) {
 
 function reviewBases(state) {
   const bases = [];
-  let remaining = 12000;
+  let remaining = 8 * 1024 - 2;
   for (const item of state.evidence.filter(event => event.uri).slice(-8).reverse()) {
     if (latestRead(state, item.uri) !== item) continue;
     const body = item.body.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
-    const limit = Math.min(remaining, body.length);
-    const end = limit === body.length ? limit : body.lastIndexOf('\n', limit - 1) + 1;
-    if (end <= 0) continue;
-    const bodyExcerpt = body.slice(0, end);
-    remaining -= bodyExcerpt.length;
-    bases.push({ uri: item.uri, seq: item.seq, sha256: digest(item.body), bodyExcerpt, truncated: end !== body.length });
-    if (remaining <= 0) break;
+    const base = { uri: item.uri, seq: item.seq, sha256: digest(item.body), bodyExcerpt: '', truncated: true };
+    let size = Buffer.byteLength(JSON.stringify(base)) + Number(bases.length > 0) + 1;
+    for (const line of body.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
+      const lineSize = Buffer.byteLength(JSON.stringify(line)) - 2;
+      if (size + lineSize > Math.min(remaining, 4096)) break;
+      size += lineSize;
+      base.bodyExcerpt += line;
+    }
+    if (!base.bodyExcerpt) continue;
+    base.truncated = base.bodyExcerpt.length !== body.length;
+    remaining -= size;
+    bases.push(base);
   }
   return bases;
 }
@@ -132,11 +138,11 @@ export async function mountEvolution(ctx, options, evidence) {
   const seen = new Map();
   const queued = new Map();
   const attempts = new Map();
-  const consumesEvidence = item => !['failed', 'cancelled', 'settings_changed', 'disabled', 'review_model_unavailable'].includes(item.status);
-  for (const item of governance.history().reverse()) {
-    attempts.set(item.sessionId, item);
-    if (consumesEvidence(item)) seen.set(item.sessionId, item);
-  }
+  const rememberRun = item => {
+    if (consumesReviewEvidence(item)) seen.set(item.sessionId, item);
+    if (isFailureOutcome(item) || consumesReviewEvidence(item) || item.status === 'review_model_unavailable') attempts.set(item.sessionId, item);
+  };
+  for (const item of governance.history().reverse()) rememberRun(item);
 
   const background = operation => {
     if (scope.signal.aborted) return;
@@ -176,64 +182,85 @@ export async function mountEvolution(ctx, options, evidence) {
     if (config.mode === 'off') return { status: 'disabled' };
     if (running) return { status: 'busy' };
     if (previous && seq <= previous.seq) return { status: 'deduped' };
-    const lastAttempt = attempts.get(sessionId);
-    if (source === 'automatic' && lastAttempt) {
-      if (seq <= lastAttempt.seq) return { status: 'deduped' };
-      if (Date.now() - Date.parse(lastAttempt.at) < config.cooldownMs) return { status: 'cooldown' };
-    }
     if (seq < 0) return { status: 'no_evidence' };
-    const at = new Date().toISOString();
+    if (source === 'manual' && agent.status === 'running') return { status: 'review_source_busy' };
+    const lastAttempt = attempts.get(sessionId);
     const started = Date.now();
-    const signal = AbortSignal.any([scope.signal, AbortSignal.timeout(60_000), ...(requestedSignal ? [requestedSignal] : [])]);
+    const retry = retryReviewDecision({ row: lastAttempt, seq, source, config, now: started });
+    if (retry) return retry;
+    const at = new Date(started).toISOString();
+    const signal = AbortSignal.any([scope.signal, AbortSignal.timeout(config.reviewTimeoutMs), ...(requestedSignal ? [requestedSignal] : [])]);
     running = { sessionId, source, at };
     let outcome;
     let provider;
     let model;
     let trace;
-    let stage;
-    let errorCode;
+    let traceId;
+    let stage = 'prepare';
+    let evidenceBytes;
     try {
+      signal.throwIfAborted();
       const drafts = listReviewCandidates(snapshot, sessionId).candidates.filter(item => item.status === 'ready');
       let proposal = drafts.length === 1 ? review(snapshot, sessionId, drafts[0].uri) : null;
       if (!proposal?.proposalId || (previous && proposal.evidence.userSeq <= previous.seq)) proposal = null;
       if (!proposal && policy?.committedEvidence?.length) {
-        const sourceModel = policy.committedEvidence.findLast(event => event.type === 'assistant/message' && event.data?.message?.source?.kind === 'model')?.data.message.source;
-        provider = config.provider || sourceModel?.provider || agent.provider || agent.model?.provider;
-        model = config.model || sourceModel?.model || (typeof agent.model === 'string' ? agent.model : agent.model?.id);
+        ({ provider, model } = config);
         const llm = ctx.get('llm');
         if (!provider || !model || !llm) {
-          outcome = { status: 'review_model_unavailable' };
+          const unavailable = { status: 'review_model_unavailable' };
+          if (lastAttempt?.status === unavailable.status && lastAttempt.seq === seq && applicableAttempt(lastAttempt, config.revision)) return unavailable;
+          outcome = unavailable;
           return outcome;
         }
-        const reviewer = createDshReviewAdapter({ llm, provider, model, sessionId });
+        if (source === 'manual') {
+          const active = ctx.get('agents')?.list?.() ?? [];
+          if ([...active].some(candidate => candidate.status === 'running' && candidate.model?.current?.()?.provider === provider)) {
+            return { status: 'review_source_busy' };
+          }
+        }
         const packet = buildEvidencePacket(policy);
+        if (!packet.length) {
+          outcome = { status: 'no_change' };
+          return outcome;
+        }
         const bases = reviewBases(snapshot);
+        const owner = options.owner ?? resolveConnection?.()?.owner;
+        evidenceBytes = Buffer.byteLength(JSON.stringify({ events: packet, bases, owner }));
         trace = createReviewStreamTrace();
+        traceId = randomUUID();
         stage = 'stream';
-        const output = await reviewer({ packet, bases, owner: options.owner ?? resolveConnection?.()?.owner, signal, onChunk: trace.onChunk });
+        const reviewer = createDshReviewAdapter({ llm, provider, model, sessionId });
+        const output = await reviewer({ packet, bases, owner, signal, onChunk: trace.onChunk });
         signal.throwIfAborted();
         stage = 'validate';
         proposal = bindProposal(output, packet, snapshot, sessionId, governance.belongs);
       }
       if (proposal) stage = 'submit';
       outcome = proposal ? await submitProposal(proposal, config, signal, 'created_by_review') : { status: 'no_change' };
+      if (outcome.status === 'cancelled') signal.throwIfAborted();
       return outcome;
     } catch (error) {
-      errorCode = reviewStreamErrorCode(error, signal);
-      outcome = { status: signal.aborted ? 'cancelled' : 'failed', reason: errorCode, ...(stage ? { stage } : {}) };
+      const errorCode = reviewStreamErrorCode(error, signal);
+      const status = errorCode === 'TimeoutError' ? 'timed_out' : errorCode === 'AbortError' ? 'cancelled' : 'failed';
+      outcome = { status, reason: errorCode, errorCode, stage };
       return outcome;
     } finally {
       try {
         if (outcome) {
-          const row = { ...outcome, sessionId, source, seq, at, durationMs: Date.now() - started, provider, model };
-          if (trace) {
-            const stream = { ...trace.snapshot(), stage: stage ?? 'stream' };
-            if (errorCode) stream.errorCode = errorCode;
-            await streamLog.write({ version: 1, at, durationMs: Date.now() - started, sessionId, source, status: outcome.status, ...stream }).catch(logWarning);
+          const finished = Date.now();
+          const durationMs = finished - started;
+          const row = { ...outcome, stage, sessionId, source, seq, at, durationMs, provider, model,
+            finishedAt: new Date(finished).toISOString(), settingsRevision: config.revision, traceId, evidenceBytes };
+          if (isFailureOutcome(row)) {
+            const sameAttempt = lastAttempt?.seq === seq && isFailureOutcome(lastAttempt) && applicableAttempt(lastAttempt, config.revision);
+            row.failureCount = sameAttempt ? (lastAttempt.failureCount ?? 1) + 1 : 1;
           }
           await governance.log(row);
-          attempts.set(sessionId, row);
-          if (consumesEvidence(row)) seen.set(sessionId, row);
+          rememberRun(row);
+          if (trace) {
+            await streamLog.write({ version: 1, traceId, at, durationMs, sessionId, source, seq, status: outcome.status,
+              stage, errorCode: outcome.errorCode, evidenceBytes, ...trace.snapshot() }).catch(logWarning);
+          }
         }
       } finally {
         running = undefined;
@@ -267,7 +294,9 @@ export async function mountEvolution(ctx, options, evidence) {
     if (event.type === 'turn/end' && settings.mode !== 'off') {
       background(() => {
         const state = policyFor(session, settings, seen.get(id));
-        if (projectReviewPolicy(state, settings).schedule && (queued.has(id) || queued.size < 16)) {
+        const now = Date.now();
+        const startedAt = state?.committedEvidence.find(event => Number.isSafeInteger(event.time) && event.time > 0)?.time ?? now;
+        if (projectReviewPolicy(state, settings, now, startedAt).schedule && (queued.has(id) || queued.size < 16)) {
           queued.set(id, true);
           drain();
         }
@@ -315,7 +344,7 @@ export async function mountEvolution(ctx, options, evidence) {
         const ownEvents = automatic.stateOf(session).events;
         const user = ownEvents.findLast(event => event.type === 'user/message' && event.data?.source?.kind === 'user');
         if (!user) return { status: 'no_learning_evidence' };
-        const combined = AbortSignal.any([scope.signal, AbortSignal.timeout(60_000), ...(signal ? [signal] : [])]);
+        const combined = AbortSignal.any([scope.signal, AbortSignal.timeout(config.reviewTimeoutMs), ...(signal ? [signal] : [])]);
         let proposal;
         try {
           const seq = ownEvents.findLast(event => event.type === 'tool/result' && event.data?.message?.isError === false)?.seq;

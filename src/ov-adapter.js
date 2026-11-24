@@ -39,6 +39,9 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
   async function request(path, options = {}) {
     const response = await fetch(new URL(path, base), {
       ...options, redirect: 'error', headers: { ...headers, ...options.headers }, signal: AbortSignal.timeout(15000),
+    }).catch(error => {
+      if (error.name === 'TimeoutError') throw Error('ov_request_timeout');
+      throw Error('ov_network_error');
     });
     if (!response.ok) {
       const error = Error(`OpenViking request failed (${response.status})`);

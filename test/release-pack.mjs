@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync,
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { contentsSha256, verifyPackedReview } from './release-gate.mjs';
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
@@ -12,7 +13,8 @@ const required = [
   'README.md', 'CHANGELOG.md', 'package.json', 'index.js', 'cordis.patch.yml', 'icon.svg',
   'locale/en.json', 'locale/zh.json', 'docs/memory-link.md', 'docs/m2-api-probe.md',
   'client.js', 'src/approval.js', 'src/automatic-review.js', 'src/curator.js', 'src/dashboard.js',
-  'src/evidence.js', 'src/evolution.js', 'src/governance.js', 'src/review-stream-log.js', 'src/memory-link.js', 'src/ov-adapter.js', 'src/review.js', 'src/skill-archive.js', 'src/attachments.js', 'src/skill-tool.js',
+  'src/evidence.js', 'src/evolution.js', 'src/governance.js', 'src/review-errors.js', 'src/review-retry.js',
+  'src/review-stream-log.js', 'src/memory-link.js', 'src/ov-adapter.js', 'src/review.js', 'src/skill-archive.js', 'src/attachments.js', 'src/skill-tool.js',
 ];
 const allowed = new Set([...required, 'LICENSE', 'LICENSE.md']);
 const work = mkdtempSync(join(tmpdir(), 'skill-evolution-pack-'));
@@ -53,8 +55,12 @@ try {
     assert.match(readFileSync(new URL(import.meta.resolve(name + '/icon')), 'utf8'), /<svg\b/);
   `], { cwd: work, stdio: 'inherit' });
 
+  assert.equal(packed.name, manifest.name);
+  assert.equal(packed.version, manifest.version);
+  const publicReview = await verifyPackedReview(packageDir, packed.name, packed.version);
   console.log(JSON.stringify({ name: packed.name, version: packed.version, tarball: destination === undefined ? null : tarball,
-    sha256: createHash('sha256').update(readFileSync(tarball)).digest('hex'), size: packed.size, files: paths }, null, 2));
+    sha256: createHash('sha256').update(readFileSync(tarball)).digest('hex'), contentsSha256: await contentsSha256(packageDir, paths),
+    size: packed.size, files: paths, publicReview }, null, 2));
 } finally {
   rmSync(work, { recursive: true, force: true });
 }

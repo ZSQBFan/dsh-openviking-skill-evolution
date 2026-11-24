@@ -1,6 +1,6 @@
 {
   "name": "dsh-openviking-skill-evolution",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "license": "MIT",
   "repository": {"type": "git", "url": "git+https://github.com/ZSQBFan/dsh-openviking-skill-evolution.git"},

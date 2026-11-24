@@ -2,10 +2,25 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { lstat, readFile, realpath, writeFile, rename } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
+import { contentsSha256, dashboardPath, model, provider, reviewer, seedReview, verifyPublicReview } from './release-gate.mjs';
+import { startWriterFixture } from './release-ov-fixture.mjs';
 
-export const inject = ['agents', 'commands', 'sessions', 'pluginManager', 'profileContext', 'hmr', 'connection', 'webServer'];
+export const inject = ['agents', 'commands', 'sessions', 'pluginManager', 'profileContext', 'hmr', 'connection', 'webServer', 'llm'];
 
-export function apply(ctx) {
+export async function apply(ctx) {
+  const firstGeneration = process.env.SKILL_EVOLUTION_RELEASE_PREVIOUS === undefined;
+  const writer = firstGeneration ? await startWriterFixture() : undefined;
+  const approvals = [];
+  if (writer) {
+    ctx.effect(() => () => writer.close());
+    ctx.provide('openvikingMemory', { config: writer.config });
+    const reviewerModel = { provider, id: model, name: 'Release reviewer fixture', context: { contextWindow: 65536 } };
+    ctx.llm.registerAdapter([provider], {
+      providerInfo: id => ({ id, name: 'Release fixture' }), providerRetryPolicy: () => undefined,
+      listModels: async () => [reviewerModel], resolveModel: async () => reviewerModel,
+      prepareCall: async () => ({ model: reviewerModel, stream: ({ messages }) => reviewer(messages, approvals) }),
+    });
+  }
   // Cancel delayed work from any instance replaced during profile composition.
   const timer = setTimeout(async () => {
     const steps = [];
@@ -14,7 +29,7 @@ export function apply(ctx) {
       const spec = JSON.parse(await readFile(process.env.SKILL_EVOLUTION_RELEASE_INPUT, 'utf8'));
       const expected = join(await realpath(process.env.DSH_HOME), 'profiles', 'web');
       assert.equal(await realpath(ctx.profileContext.dir), expected);
-      const { name, version, tarball, sha256 } = spec;
+      const { name, version, tarball, sha256, files } = spec;
       assert.equal(createHash('sha256').update(await readFile(tarball)).digest('hex'), sha256);
       const manager = ctx.pluginManager;
       const getBundle = async () => (await manager.listBundles()).find(bundle => bundle.name === name);
@@ -53,9 +68,9 @@ export function apply(ctx) {
       const packageDir = join(expected, 'node_modules', name);
       const packageRelative = relative(expected, await realpath(packageDir));
       assert(!packageRelative.startsWith(`..${sep}`) && packageRelative.startsWith(`node_modules${sep}`));
-      for (const file of ['package.json', 'index.js', 'cordis.patch.yml', 'locale/en.json', 'locale/zh.json', 'icon.svg']) {
-        assert((await lstat(join(packageDir, file))).isFile(), file);
-      }
+      for (const file of files) assert((await lstat(join(packageDir, file))).isFile(), file);
+      const installedHash = await contentsSha256(packageDir, files);
+      assert.equal(installedHash, spec.contentsSha256, 'installed file contents match the candidate');
       assert.equal(command('skill-refine')?.name, 'skill-refine');
       for (const name of ['skill-approve', 'skill-reject', 'skill-rollback']) assert.equal(command(name), undefined);
 
@@ -64,19 +79,38 @@ export function apply(ctx) {
         const login = await fetch(ctx.connection.authenticatedUrl(origin), { redirect: 'manual' });
         const cookie = login.headers.get('set-cookie')?.split(';')[0];
         assert(cookie, 'fixture login established an owner session');
-        const url = `${origin}/api/dsh-openviking-skill-evolution/dashboard`;
-        const snapshot = await fetch(url, { headers: { Cookie: cookie } });
-        assert.equal(snapshot.status, 200);
-        assert.equal((await snapshot.json()).data.capabilities.run, true);
-        const run = await fetch(url, { method: 'POST', headers: { Cookie: cookie, Origin: origin, 'content-type': 'application/json' },
-          body: JSON.stringify({ action: 'run', input: { sessionId } }) });
-        assert.equal(run.status, 200);
-        assert.deepEqual(await run.json(), { ok: true, data: { status: 'no_evidence' } });
+        async function request(action, input) {
+          const init = action === undefined ? { headers: { Cookie: cookie } } : {
+            method: 'POST', headers: { Cookie: cookie, Origin: origin, 'content-type': 'application/json' },
+            body: JSON.stringify({ action, input }),
+          };
+          const response = await fetch(`${origin}${dashboardPath}`, { ...init, signal: AbortSignal.timeout(15000) });
+          const result = await response.json();
+          assert.equal(response.status, 200, JSON.stringify(result));
+          assert.equal(result.ok, true);
+          return result.data;
+        }
+        assert.deepEqual(await request('run', { sessionId }), { status: 'no_evidence' });
         steps.push('dashboard can review a session created before bundle installation');
         const proposalId = await checkProposal(session, outcome, uri);
         await ctx.sessions.flush(session);
-        steps.push('shadow proposal and deduplication');
-        report = { ok: true, steps, name, version, sha256, sessionId, proposalId, pid: process.pid };
+        steps.push('skill-refine patch preview and deduplication');
+        const publicReview = await verifyPublicReview({
+          request, observed: approvals, liveBody: writer.liveBody,
+          async session(label, body, replacement) {
+            const id = `release-review-${label}`;
+            const { agent } = await ctx.agents.create({ sessionId: id, meta: { cwd: process.cwd() } });
+            seedReview((type, data, sourceEventSeqs) => agent.session.append(type, data,
+              type === 'tool/call' ? undefined : { surfaceOp: 'append', sourceEventSeqs }), body, replacement);
+            await ctx.sessions.flush(agent.session);
+            return id;
+          },
+        });
+        assert.deepEqual(writer.errors, []);
+        assert.deepEqual(writer.writes, ['upload', 'replace']);
+        steps.push('public reviewer submission, approval and fixture readback');
+        report = { ok: true, steps, name, version, sha256, contentsSha256: installedHash, sessionId, proposalId, pid: process.pid,
+          publicReview: { ...publicReview, writes: writer.writes } };
       } else {
         const first = JSON.parse(await readFile(previous, 'utf8'));
         assert.notEqual(process.pid, first.pid);
@@ -87,7 +121,7 @@ export function apply(ctx) {
         assert.equal(duplicate.previousProposalId, first.proposalId);
         steps.push('persisted install and same-session deduplication after restart');
         await checkRemoval({ manager, name, packageDir, changed, getBundle, command, execute });
-        report = { ok: true, steps, name, version, sha256, sessionId, pid: process.pid };
+        report = { ok: true, steps, name, version, sha256, contentsSha256: installedHash, sessionId, pid: process.pid };
       }
     } catch (error) {
       report = { ok: false, steps, error: error.stack };

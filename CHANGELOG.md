@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.7
+
+- Make review timeout configurable with a 300-second default, expose the duration trigger, and require an explicit model route for model-backed reviews.
+- Show the latest three proposals and runs by default, with older entries expandable and timestamps displayed in the local time zone.
+- Persist stage, error code, and trace ID for new runs. Recover older attributions when an exact trace exists and distinguish timeouts from cancellations.
+- Apply failure-aware retry limits to manual and automatic runs, and bound the evidence sent to the reviewer.
+- Validate the structured reviewer response and verify candidate packages through the public approve, submit, and readback path.
+
 ## 0.2.6
 
 - Fix rollback verification when persisted metadata has the same values in a different key order.

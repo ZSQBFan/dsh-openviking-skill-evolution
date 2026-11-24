@@ -18,15 +18,26 @@ test('policy bounds turns, tools, duration and repeated failures', () => {
   assert.equal(projectReviewPolicy({ ...state, failure: false, failureCount: 0, turns: 0 }, {}, 1_800_000, 0).reason, 'duration_limit');
 });
 
+test('review policy exposes duration and timeout with the same bounds as governance', () => {
+  const state = { committedEvidence: [], turns: 0, toolCalls: 0, failureCount: 0 };
+  const config = { maxDurationMs: 90_000, reviewTimeoutMs: 1234, cooldownMs: 0 };
+  const policy = projectReviewPolicy(state, config, 90_000, 0);
+  assert.equal(policy.reason, 'duration_limit');
+  assert.equal(policy.limits.reviewTimeoutMs, 1234);
+  assert.equal(projectReviewPolicy(state).limits.reviewTimeoutMs, 300_000);
+  assert.throws(() => projectReviewPolicy(state, { reviewTimeoutMs: 0 }), /invalid_reviewTimeoutMs/);
+  assert.throws(() => projectReviewPolicy(state, { maxDurationMs: 604_800_001 }), /invalid_maxDurationMs/);
+});
+
 test('reviewer output is strict and evidence must be committed', () => {
   const state = automaticReviewProjection(undefined, { seq: 1, type: 'tool/result', data: { ok: true } });
   const packet = buildEvidencePacket(state);
-  const result = parseReviewerOutput(JSON.stringify({ decision: 'approve', reason: 'evidence supports it', evidence: [{ seq: 1, kind: 'tool/result' }] }));
-  assert.equal(result.decision, 'approve');
+  const result = parseReviewerOutput(JSON.stringify({ decision: 'no_change', reason: 'No reusable change', evidence: [{ seq: 1, kind: 'tool/result' }] }));
+  assert.equal(result.decision, 'no_change');
   assert.throws(() => parseReviewerOutput('{"decision":"approve","reason":"x","evidence":[]}'), /reviewer_evidence_required/);
   assert.equal(packet[0].seq, 1);
-  const secretState = automaticReviewProjection(undefined, { seq: 2, type: 'tool/call', data: { authorization: 'secret-token', nested: { password: 'pw' } } });
-  assert.deepEqual(buildEvidencePacket(secretState)[0].data, { authorization: '[redacted]', nested: { password: '[redacted]' } });
+  const secretState = automaticReviewProjection(undefined, { seq: 2, type: 'tool/call', data: { authorization: 'secret-token', nested: { password: 'pw' }, name: 'fixture' }, text: 'password: hidden' });
+  assert.deepEqual(JSON.parse(JSON.stringify(buildEvidencePacket(secretState))), [{ seq: 2, type: 'tool/call', text: 'password: [redacted]', tool: 'fixture' }]);
 });
 
 test('DSH adapter uses zero-tool ctx.llm.stream contract', async () => {
@@ -65,6 +76,17 @@ test('review retains upstream stream errors even after receiving valid JSON', as
   const adapter = createDshReviewAdapter({ provider: 'fixture', model: 'fixture', sessionId: 'test',
     llm: { async *stream() { yield { type: 'text-delta', text: '{}' }; yield { type: 'finish', reason: { kind: 'error' } }; } } });
   await assert.rejects(adapter({ packet: [] }), /reviewer_stream_failed/);
+});
+
+test('DSH terminal finish preserves upstream failure code and rejects truncated JSON', async () => {
+  const adapter = reason => createDshReviewAdapter({ provider: 'p', model: 'm', sessionId: 's', llm: {
+    async *stream() {
+      yield { type: 'text-delta', text: '{"decision":"no_change","reason":"no durable evidence","evidence":[]}' };
+      yield { type: 'finish', reason };
+    },
+  } });
+  await assert.rejects(adapter({ kind: 'error', failure: { code: 'RATE_LIMITED' } })({ packet: [] }), { code: 'RATE_LIMITED' });
+  await assert.rejects(adapter({ kind: 'max-tokens' })({ packet: [] }), /reviewer_output_truncated/);
 });
 
 test('proposal conversion preserves review shape and hashes without proposalId', () => {

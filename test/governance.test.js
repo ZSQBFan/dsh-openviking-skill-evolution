@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createApprovalService } from '../src/approval.js';
+import { projectReviewPolicy } from '../src/automatic-review.js';
 import { createGovernance } from '../src/governance.js';
 import { review } from '../src/review.js';
 
@@ -108,6 +109,84 @@ test('default auto patches an existing private skill without a target list and r
   assert.equal((await restarted.proposals())[0].id, proposalId);
   assert.equal((await restarted.vote('rollback', proposalId)).status, 'rolled_back');
   assert.deepEqual(live, original);
+});
+
+test('legacy governance settings gain millisecond defaults and persist custom duration and timeout', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'skill-governance-settings-'));
+  t.after(() => rm(directory, { recursive: true }));
+  const options = { directory, owner: 'fixture' };
+  const path = join(directory, 'governance.json');
+  await writeFile(path, JSON.stringify({ version: 1, owner: 'fixture', revision: 7, runs: [], shadows: [], settings: {
+    mode: 'shadow', maxTurns: 12, maxToolCalls: 10, cooldownMs: 0, maxFailures: 3,
+    correctionWords: ['correction'], provider: '', model: '',
+  } }));
+  const governor = await createGovernance(options);
+  assert.equal(governor.settings().maxDurationMs, 1_800_000);
+  assert.equal(governor.settings().reviewTimeoutMs, 300_000);
+  for (const invalid of [{ maxDurationMs: 0 }, { reviewTimeoutMs: 0 }, { reviewTimeoutMs: '5000' }, { reviewTimeoutMs: 1.5 }]) {
+    assert.deepEqual(await governor.update({ revision: 7, ...invalid }), { status: 'invalid_settings' });
+  }
+  assert.deepEqual(await governor.update({ revision: 7, maxDurationMs: 90_000, reviewTimeoutMs: 5000 }), { status: 'saved', revision: 8 });
+  const persisted = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(persisted.settings.maxDurationMs, 90_000);
+  assert.equal(persisted.settings.reviewTimeoutMs, 5000);
+  const settings = (await createGovernance(options)).settings();
+  assert.equal(settings.maxDurationMs, 90_000);
+  assert.equal(settings.reviewTimeoutMs, 5000);
+  assert.equal(settings.maxTurns, 12);
+  assert.equal(settings.cooldownMs, 0);
+});
+
+test('settings and runtime expose the same review limits and accept the same values', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'skill-governance-contract-'));
+  t.after(() => rm(directory, { recursive: true }));
+  const governor = await createGovernance({ directory, owner: 'fixture' });
+  const { mode, correctionWords, provider, model, revision, modes, effectiveMode, writeConnection, ...storedLimits } = governor.settings();
+  const policyLimits = projectReviewPolicy(undefined).limits;
+  assert.deepEqual(storedLimits, policyLimits);
+
+  const changes = Object.fromEntries(Object.entries(policyLimits).map(([key, value]) => [key, value + 1]));
+  for (const key of Object.keys(changes)) {
+    const invalid = { [key]: -1 };
+    assert.deepEqual(await governor.update({ revision, ...invalid }), { status: 'invalid_settings' });
+    assert.throws(() => projectReviewPolicy(undefined, invalid), { message: `invalid_${key}` });
+  }
+  assert.equal((await governor.update({ revision, ...changes })).status, 'saved');
+  const savedLimits = Object.fromEntries(Object.keys(changes).map(key => [key, governor.settings()[key]]));
+  assert.deepEqual(savedLimits, projectReviewPolicy(undefined, changes).limits);
+});
+
+test('mixed official and shadow proposals are listed newest first by persisted creation time', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'skill-governance-proposals-'));
+  t.after(() => rm(directory, { recursive: true }));
+  const writer = { adapter: { mode: 'atomic-conditional', read: async () => null, verifyIndex: async () => true,
+    create() { assert.fail('unexpected apply'); }, replace() { assert.fail('unexpected apply'); },
+    remove() { assert.fail('unexpected rollback'); } } };
+  const options = { directory, owner: 'fixture', writer, settings: { mode: 'approval' } };
+  const governor = await createGovernance(options);
+  const { proposalId, ...original } = proposal();
+  const makeProposal = reason => {
+    const record = { ...original, reason };
+    return { ...record, proposalId: sha(JSON.stringify(record)) };
+  };
+  const first = makeProposal('first');
+  const second = makeProposal('second');
+  const third = makeProposal('third');
+  const dates = ['2026-11-20T12:00:00.000Z', '2026-11-21T12:00:00.000Z', '2026-11-22T12:00:00.000Z'];
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(dates[0]) });
+  assert.equal((await governor.submit(first)).status, 'pending');
+  await governor.update({ revision: 0, mode: 'shadow' });
+  t.mock.timers.setTime(Date.parse(dates[1]));
+  assert.equal((await governor.submit(second)).status, 'shadow');
+  await governor.update({ revision: 1, mode: 'approval' });
+  t.mock.timers.setTime(Date.parse(dates[2]));
+  assert.equal((await governor.submit(third)).status, 'pending');
+  assert.equal((await governor.vote('reject', first.proposalId)).status, 'rejected');
+  const restarted = await createGovernance(options);
+  const list = await restarted.proposals();
+  assert.deepEqual(list.map(item => item.id), [third, second, first].map(item => item.proposalId));
+  assert.deepEqual(list.map(item => item.createdAt), [...dates].reverse());
+  assert.equal((await restarted.preview(second.proposalId)).diff, second.diff);
 });
 
 test('reviewer patch writes only the bound body and preserves package metadata and attachments', async t => {
