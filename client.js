@@ -13,15 +13,21 @@ window.__ModuleLoader__.load({
     const dictionaries = {
       en: {
         title: 'Skill evolution', subtitle: 'OpenViking · Review and lifecycle', refresh: 'Refresh', run: 'Run review',
-        loading: 'Loading dashboard…', working: 'Working…', overview: 'Overview', history: 'Run history',
+        loading: 'Loading dashboard…', refreshing: 'Refreshing dashboard…', working: 'Working…', overview: 'Overview', history: 'Run history',
         proposals: 'Proposals', curatorTitle: 'Curator', settingsTitle: 'Settings', usage: 'Usage', memory: 'Memory',
         noHistory: 'No review runs yet.', noProposals: 'No proposals yet.', noSkills: 'No managed skills yet.',
         empty: 'No data reported.', status: 'Status', mode: 'Review mode', lastRun: 'Last run', nextRun: 'Next run',
         idle: 'Idle', running: 'Running', disabled: 'Disabled', off: 'Off', manual: 'Manual', shadow: 'Keep drafts only',
         propose: 'Propose', approval: 'Ask before updating', auto: 'Update automatically (recommended)', pending: 'Pending',
-        ready: 'Ready', applied: 'Applied', rejected: 'Rejected', archived: 'Archived', restored: 'Restored',
+        ready: 'Ready', applied: 'Applied', rolled_back: 'Rolled back', rejected: 'Rejected', archived: 'Archived', restored: 'Restored',
+        indexUnconfirmed: 'Skill version verified. Search indexing is still unconfirmed.',
+        removalIndexUnconfirmed: 'Skill removal verified. Search indexing is still unconfirmed.',
         active: 'Active', failed: 'Failed', skipped: 'Skipped', session: 'Session ID',
-        currentSession: 'Use the current session', settings: 'Save settings', preview: 'Preview',
+        currentSession: 'Use the current session', sessionPlaceholder: 'Enter a session ID',
+        reviewNeedsSession: 'Open a session or enter its ID to run a review.', reviewOff: 'Enable a review mode to run a review.',
+        no_session: 'Session unavailable. Open a regular conversation or check the session ID.',
+        no_evidence: 'This conversation has no reviewable activity yet.', deduped: 'This conversation has already been reviewed. There is no new activity.',
+        busy: 'A review is already running. Try again after it finishes.', settings: 'Save settings', preview: 'Preview',
         approve: 'Approve', reject: 'Reject', rollback: 'Rollback', curator: 'Run curator',
         adopt: 'Adopt', archive: 'Archive', restore: 'Restore', uri: 'Private skill URI',
         confirm: 'Confirm', cancel: 'Cancel', close: 'Close',
@@ -44,15 +50,21 @@ window.__ModuleLoader__.load({
       },
       zh: {
         title: '技能演进', subtitle: 'OpenViking · 复盘与生命周期', refresh: '刷新', run: '运行复盘',
-        loading: '正在加载仪表板…', working: '正在处理…', overview: '概览', history: '运行历史',
+        loading: '正在加载仪表板…', refreshing: '正在刷新仪表板…', working: '正在处理…', overview: '概览', history: '运行历史',
         proposals: '提案', curatorTitle: '技能治理', settingsTitle: '设置', usage: '用量', memory: '记忆',
         noHistory: '暂无复盘记录。', noProposals: '暂无提案。', noSkills: '暂无纳管技能。',
         empty: '暂无数据。', status: '状态', mode: '复盘模式', lastRun: '最近运行', nextRun: '下次运行',
         idle: '空闲', running: '运行中', disabled: '已禁用', off: '关闭', manual: '手动', shadow: '只保存草稿',
         propose: '生成提案', approval: '确认后更新', auto: '自动更新（推荐）', pending: '待处理',
-        ready: '就绪', applied: '已应用', rejected: '已驳回', archived: '已归档', restored: '已恢复',
+        ready: '就绪', applied: '已应用', rolled_back: '已回滚', rejected: '已驳回', archived: '已归档', restored: '已恢复',
+        indexUnconfirmed: '技能版本已核验，搜索索引尚未确认。',
+        removalIndexUnconfirmed: '已核验技能移除，搜索索引尚未确认。',
         active: '活跃', failed: '失败', skipped: '已跳过', session: '会话 ID',
-        currentSession: '使用当前会话', settings: '保存设置', preview: '预览',
+        currentSession: '使用当前会话', sessionPlaceholder: '输入会话 ID',
+        reviewNeedsSession: '打开一个会话，或输入会话 ID 后再运行复盘。', reviewOff: '开启复盘模式后即可运行复盘。',
+        no_session: '会话不可用。请打开普通会话或核对会话 ID。',
+        no_evidence: '这个会话暂时没有可复盘的活动。', deduped: '这个会话已复盘，暂无新活动。',
+        busy: '已有复盘正在运行，请在完成后重试。', settings: '保存设置', preview: '预览',
         approve: '批准', reject: '驳回', rollback: '回滚', curator: '运行治理',
         adopt: '纳管', archive: '归档', restore: '恢复', uri: '私有技能 URI',
         confirm: '确认', cancel: '取消', close: '关闭',
@@ -93,6 +105,13 @@ window.__ModuleLoader__.load({
       const result = await response.json().catch(() => null);
       if (!response.ok || result?.ok !== true) throw new Error(result?.error || 'operationFailed');
       return result.data;
+    }
+
+    function activateOnEnter(event) {
+      if (event.key !== 'Enter' || event.defaultPrevented || event.nativeEvent.isComposing ||
+          event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      event.preventDefault();
+      if (!event.repeat) event.currentTarget.click();
     }
 
     function Button({ children, primary, ...props }) {
@@ -152,11 +171,17 @@ window.__ModuleLoader__.load({
       return h(Value, { value: preview, t });
     }
 
-    function Dashboard({ t }) {
+    const noCurrentSession = () => undefined;
+    const selectCurrentSession = state => Object.values(state.byId)
+      .find(session => !session.blank && (session.retainedBy.mainView ?? 0) > 0)?.id;
+
+    function Dashboard({ t, useSessions = noCurrentSession }) {
+      const currentSessionId = useSessions(selectCurrentSession);
       const [data, setData] = useState(null);
       const [error, setError] = useState('');
       const [notice, setNotice] = useState(null);
       const [busy, setBusy] = useState('');
+      const [refreshing, setRefreshing] = useState(false);
       const [session, setSession] = useState('');
       const [uri, setUri] = useState('');
       const [draft, setDraft] = useState(null);
@@ -166,10 +191,11 @@ window.__ModuleLoader__.load({
       const pending = useRef(false);
       const reading = useRef(null);
 
-      async function refresh(signal = connection.current?.signal, fresh = false) {
+      async function refresh(signal = connection.current?.signal, fresh = false, manual = false) {
         if (!signal || signal.aborted || (!fresh && reading.current?.signal === signal)) return;
-        const read = { signal };
+        const read = { signal, manual: manual || (reading.current?.signal === signal && reading.current.manual) };
         reading.current = read;
+        if (manual) setRefreshing(true);
         try {
           const next = await requestDashboard(signal);
           if (!signal.aborted && reading.current === read) {
@@ -181,8 +207,17 @@ window.__ModuleLoader__.load({
             setError(Object.hasOwn(dictionaries.en, cause.message) ? cause.message : 'network');
           }
         } finally {
-          if (reading.current === read) reading.current = null;
+          if (reading.current === read) {
+            reading.current = null;
+            if (!signal.aborted && read.manual) setRefreshing(false);
+          }
         }
+      }
+
+      async function refreshFromButton() {
+        const signal = connection.current?.signal;
+        if (!signal || signal.aborted || pending.current || reading.current?.manual) return;
+        await refresh(signal, true, true);
       }
 
       useEffect(() => {
@@ -208,7 +243,7 @@ window.__ModuleLoader__.load({
           if (action === 'preview') setPreview({ id: input.id, value: reply });
           else {
             if (action === 'settings') setDraft(null);
-            setNotice({ result: reply });
+            setNotice({ result: reply, action });
             await refresh(signal, true);
           }
         } catch (cause) {
@@ -221,7 +256,8 @@ window.__ModuleLoader__.load({
 
       const enabled = action => !error && data?.capabilities?.[action] === true;
       function actionButton(action, input) {
-        return h(Button, { key: action, disabled: !!busy || !enabled(action), onClick: () => {
+        return h(Button, { key: action, disabled: !!busy || !enabled(action),
+          onKeyDown: action === 'preview' ? activateOnEnter : undefined, onClick: () => {
           if (confirmCopy[action]) setConfirmation({ action, input });
           else void run(action, input);
         } }, t(action));
@@ -252,22 +288,39 @@ window.__ModuleLoader__.load({
       }
       const curator = data?.curator ?? {};
       const status = typeof data?.status === 'string' ? { state: data.status } : (data?.status ?? {});
+      const reviewSessionId = session.trim() || currentSessionId;
+      const reviewRunning = status.state === 'running';
+      const canReview = enabled('run');
+      const reviewHint = settings.mode === 'off' ? 'reviewOff'
+        : reviewRunning ? 'busy'
+        : canReview && !reviewSessionId ? 'reviewNeedsSession' : null;
       const skillRows = rows(curator.skills);
       const proposals = rows(data?.proposals);
       const history = rows(data?.history);
+      function indexWarning(item) {
+        if (item.status !== 'applied' && item.status !== 'rolled_back') return null;
+        const events = rows(item.history);
+        const latest = events.findLastIndex(event => event.status === item.status);
+        if (events[latest - 1]?.status !== 'index_unconfirmed') return null;
+        return h('p', { className: 'ove-muted' }, t(item.status === 'applied' ? 'indexUnconfirmed' : 'removalIndexUnconfirmed'));
+      }
 
       return h('div', { className: 'ove-dashboard' },
         h('style', null, css),
         h('header', { className: 'ove-header' },
           h('div', null, h('h1', null, t('title')), h('p', { className: 'ove-muted' }, t('subtitle'))),
-          h('div', { className: 'ove-controls' }, h(Button, { disabled: !!busy, onClick: () => void refresh() }, t('refresh')))),
+          h('div', { className: 'ove-controls' },
+            h(Button, { disabled: !!busy || refreshing, onClick: refreshFromButton }, t('refresh')),
+            refreshing && h('span', { role: 'status', className: 'ove-muted' }, t('refreshing')))),
         error && h('p', { role: 'alert', className: 'ove-message' }, t(error)),
         !data && !error && h('p', { role: 'status' }, t('loading')),
         busy && h('p', { role: 'status', className: 'ove-message' }, t('working')),
         notice?.error && h('p', { role: 'alert', className: 'ove-message' }, t(notice.error)),
         notice && !notice.error && h('div', { className: 'ove-message', role: 'status' },
           h('strong', null, t('result')),
-          notice.result === null ? ` · ${t('actionComplete')}` : h(Value, { value: notice.result, t })),
+          notice.action === 'run' && ['no_session', 'no_evidence', 'deduped', 'busy'].includes(notice.result?.status)
+            ? ` · ${t(notice.result.status)}`
+            : notice.result === null ? ` · ${t('actionComplete')}` : h(Value, { value: notice.result, t })),
         confirmation && h('section', { className: 'ove-message ove-controls', role: 'group', 'aria-label': t(confirmCopy[confirmation.action]) },
           h('span', null, t(confirmCopy[confirmation.action]), ' ', confirmation.input.id ?? confirmation.input.uri),
           h(Button, { onClick: () => setConfirmation(null) }, t('cancel')),
@@ -283,7 +336,7 @@ window.__ModuleLoader__.load({
             modes.length > 0 && h('label', null, t('mode'), h('select', {
               value: mode, disabled: settingsDisabled, onChange: event => changeSetting('mode', event.target.value),
             }, modes.map(option => h('option', { key: option.id, value: option.id }, known(t, option.id))))),
-            h('details', { className: 'ove-advanced' }, h('summary', null, t('advanced')),
+            h('details', { className: 'ove-advanced' }, h('summary', { onKeyDown: activateOnEnter }, t('advanced')),
               h('p', { className: 'ove-muted' }, t('modelDefault')),
               h('div', { className: 'ove-settings ove-settings-grid' }, [...countFields, ...textFields].map(key => {
               const isCount = countFields.includes(key);
@@ -303,15 +356,17 @@ window.__ModuleLoader__.load({
             h('div', { className: 'ove-controls' },
               h('span', { className: 'ove-status' }, h(Value, { value: status.state ?? status.status, t })),
               h('label', null, t('session'), ' ', h('input', {
-                value: session, placeholder: t('currentSession'), disabled: !enabled('run') || !!busy,
+                value: session, placeholder: t(currentSessionId ? 'currentSession' : 'sessionPlaceholder'), disabled: !canReview || !!busy,
                 onChange: event => setSession(event.target.value),
               })),
-              h(Button, { primary: true, disabled: !!busy || !enabled('run'), onClick: () => void run('run', session.trim() ? { sessionId: session.trim() } : {}) }, t('run'))),
+              h(Button, { primary: true, disabled: !!busy || !canReview || !reviewSessionId || reviewRunning,
+                onClick: () => void run('run', { sessionId: reviewSessionId }) }, t('run'))),
+            reviewHint && h('p', { className: 'ove-muted' }, t(reviewHint)),
             h(Facts, { t, data: Object.fromEntries(Object.entries(status).filter(([key]) => key !== 'state' && key !== 'status')) })),
           h(Card, { title: t('proposals') }, proposals.length ? h('ul', { className: 'ove-list' }, proposals.map(item => h('li', { key: item.id },
             h('div', { className: 'ove-row' }, h('div', null,
               h('strong', null, item.title ?? item.uri ?? item.id), ' ', h('span', { className: 'ove-status' }, h(Value, { value: item.status, t })),
-              item.summary && h('p', { className: 'ove-muted' }, item.summary)),
+              item.summary && h('p', { className: 'ove-muted' }, item.summary), indexWarning(item)),
             h('div', { className: 'ove-controls' }, proposalActions.filter(action => enabled(action) && (!Array.isArray(item.actions) || item.actions.includes(action))).map(action => actionButton(action, { id: item.id })))),
             preview?.id === item.id && h('div', { className: 'ove-preview' },
               h('div', { className: 'ove-row' }, h('h3', null, t('preview')), h(Button, { onClick: () => setPreview(null) }, t('close'))),

@@ -1,7 +1,54 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { mountEvolution } from '../src/evolution.js';
+
+async function mountReview(t, { existing = [], mode = 'shadow', resolveAgent } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'skill-dashboard-test-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const sessions = new Map(existing.map(id => [id, { session: { id } }]));
+  const agents = { get: id => sessions.get(id), list: () => [...sessions.values()] };
+  let route;
+  const ctx = {
+    get: name => ({ agents, sessionController: resolveAgent && { resolveAgent } })[name],
+    on() {}, effect(create) { t.after(create()); },
+    inject(dependencies, mount) {
+      if (dependencies.includes('connection')) {
+        mount({ connection: { fetch: { register(value) { route = value; } } } });
+      }
+    },
+    sessionProjections: { async register() { return { stateOf: () => ({ events: [] }) }; } },
+  };
+  await mountEvolution(ctx, { directory, owner: 'fixture', settings: { mode } }, { stateOf: () => ({ evidence: [] }) });
+  return input => route.fetch(new Request(`http://localhost${route.path}`, input === undefined ? {} : {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'run', input }),
+  }));
+}
+
+test('manual dashboard review finds an agent created before the plugin mounted', async t => {
+  const request = await mountReview(t, { existing: ['existing-session'] });
+  assert.equal((await (await request()).json()).data.capabilities.run, true);
+  assert.deepEqual(await (await request({ sessionId: 'existing-session' })).json(), { ok: true, data: { status: 'no_evidence' } });
+  assert.deepEqual(await (await request({})).json(), { ok: true, data: { status: 'no_session' } });
+});
+
+test('manual dashboard review resolves a stored session with no live agent', async t => {
+  const request = await mountReview(t, {
+    resolveAgent: async id => id === 'stored-session' ? { agent: { session: { id } } } : { error: {} },
+  });
+  assert.equal((await (await request()).json()).data.capabilities.run, true);
+  assert.deepEqual(await (await request({ sessionId: 'stored-session' })).json(), { ok: true, data: { status: 'no_evidence' } });
+  assert.deepEqual(await (await request({ sessionId: 'missing-session' })).json(), { ok: true, data: { status: 'no_session' } });
+});
+
+test('turning reviews off blocks manual requests before session resolution', async t => {
+  const request = await mountReview(t, { mode: 'off', resolveAgent: () => assert.fail('must not resolve a session') });
+  assert.equal((await (await request()).json()).data.capabilities.run, false);
+  assert.equal((await request({ sessionId: 'stored-session' })).status, 403);
+});
 
 async function mount(options) {
   const { mountDashboard } = await import('../src/dashboard.js').catch(error => {

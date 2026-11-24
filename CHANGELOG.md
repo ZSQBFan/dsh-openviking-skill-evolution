@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.6
+
+- Fix rollback verification when persisted metadata has the same values in a different key order.
+- Let newly created skills converge to applied or rolled-back after exact package readback, while clearly reporting unconfirmed search indexing.
+- Improve dashboard session selection, manual refresh feedback, keyboard activation and retry states.
+- Verified the final candidate with 13 P0 user-acceptance cases on DSH 0.2.2-rc.5 and OpenViking 0.5.5.
+
 ## 0.2.5
 
 - Keep automatic-review response diagnostics in a bounded, seven-day local log.

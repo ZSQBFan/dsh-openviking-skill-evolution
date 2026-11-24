@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { applyAttachmentOperations, validateAttachmentOperations } from './attachments.js';
 import { isSkillUri } from './evidence.js';
+import { SkillSnapshotConflict } from './ov-adapter.js';
 import { skillArchive } from './skill-archive.js';
 import * as review from './review.js';
 
@@ -117,8 +118,21 @@ export function createApprovalService({ directory, managedUri, adapter }) {
     } catch {
       indexed = false;
     }
-    if (!indexed) return note(record, 'index_unconfirmed', persist);
+    if (!indexed) {
+      if (record.before !== null) return note(record, 'index_unconfirmed', persist);
+      // Creation and removal are already verified by exact package readback.
+      if (record.history.at(-1)?.status !== 'index_unconfirmed') {
+        record.history.push({ status: 'index_unconfirmed', at: new Date().toISOString() });
+      }
+    }
     return transition(record, restoring ? 'rolled_back' : 'applied', persist);
+  }
+
+  function conflict(record, restoring, persist) {
+    if (!restoring) return transition(record, 'conflict', persist);
+    // The adapter confirmed the mismatch before dispatching a restore.
+    record.status = 'applied';
+    return note(record, 'rollback_conflict', persist);
   }
 
   function vote(input, action) {
@@ -143,12 +157,7 @@ export function createApprovalService({ directory, managedUri, adapter }) {
       const to = restoring ? record.before : record.after;
       await adapter.preflight?.(managedUri, to);
       const live = await readSnapshot();
-      if (snapshotHash(live) !== snapshotHash(from)) {
-        if (!restoring) return transition(record, 'conflict', persist);
-        record.history.push({ status: 'rollback_conflict', at: new Date().toISOString() });
-        await persist();
-        return { status: 'rollback_conflict' };
-      }
+      if (snapshotHash(live) !== snapshotHash(from)) return conflict(record, restoring, persist);
       input.signal?.throwIfAborted();
       const previous = record.status;
       await transition(record, restoring ? 'restoring' : 'applying', persist);
@@ -158,7 +167,10 @@ export function createApprovalService({ directory, managedUri, adapter }) {
           const operation = to === null ? adapter.remove : from === null ? adapter.create : adapter.replace;
           const args = to === null ? [managedUri, from, input.signal] : [managedUri, to, from, input.signal];
           skipped = (await operation.call(adapter, ...args)) === false;
-        } catch { /* A failed response can follow a committed write. */ }
+        } catch (error) {
+          if (error instanceof SkillSnapshotConflict) return conflict(record, restoring, persist);
+          // A failed response can follow a committed write.
+        }
       }
       if (skipped) {
         await transition(record, previous, persist);

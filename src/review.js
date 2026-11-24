@@ -23,6 +23,38 @@ function patch(skill, correction, sessionId) {
   };
 }
 
+// Compile a single exact line replacement without reserializing the untouched Markdown.
+export function buildReplacementDiff(base, uri, replacement) {
+  const frontmatter = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(base)?.[0];
+  const { before, after } = replacement ?? {};
+  const validLines = lines => Array.isArray(lines) && lines.length <= 256 &&
+    lines.every(line => typeof line === 'string' && !/[\r\n\0]/.test(line));
+  if (!frontmatter || !validLines(before) || !before.length || !validLines(after)) throw Error('reviewer_replacement_invalid');
+  const source = base.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const firstBodyLine = frontmatter.split('\n').length - 1;
+  const matches = [];
+  for (let i = firstBodyLine; i <= source.length - before.length; i++) {
+    if (before.every((line, offset) => source[i + offset].replace(/\r?\n$/, '') === line)) matches.push(i);
+  }
+  if (matches.length !== 1) throw Error('reviewer_replacement_not_unique');
+  const [start] = matches;
+  const original = source.slice(start, start + before.length);
+  const endpoint = original.at(-1);
+  const ending = (original.find(line => line.endsWith('\n')) ?? frontmatter).endsWith('\r\n') ? '\r\n' : '\n';
+  const updated = after.map((line, i) => line + (i === after.length - 1 && !endpoint.endsWith('\n') ? '' : ending));
+  const encode = (lines, marker) => lines.map(line => `${marker}${line}${line.endsWith('\n') ? '' : `\n${NO_NEWLINE}\n`}`).join('');
+  return `--- ${uri}\n+++ ${uri}\n@@ -${start + 1},${original.length} +${start + (updated.length ? 1 : 0)},${updated.length} @@\n` +
+    encode(original, '-') + encode(updated, '+');
+}
+
+export function buildCreateDiff(uri, { description, body }) {
+  if (typeof description !== 'string' || !description.trim() || description.length > 500 || /[\r\n\0]/.test(description) ||
+      typeof body !== 'string' || !body.trim() || body.length > 20000 || body.includes('\0')) throw Error('reviewer_create_content_invalid');
+  const lines = ['---', `name: ${uri.split('/').at(-2)}`, `description: ${JSON.stringify(description.trim())}`, '---', '',
+    ...body.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n')];
+  return `--- /dev/null\n+++ ${uri}\n@@ -0,0 +1,${lines.length} @@\n${lines.map(line => `+${line}`).join('\n')}\n`;
+}
+
 // Apply ordered unified hunks to an exact base without modifying frontmatter.
 export function applySkillDiff(base, diff, uri) {
   if (typeof base !== 'string' || typeof diff !== 'string' || diff.length > 24000 || !isSkillUri(uri)) throw Error('invalid_skill_diff');

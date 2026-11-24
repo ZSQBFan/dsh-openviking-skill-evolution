@@ -16,6 +16,9 @@ const REVIEW_ERRORS = new Set([
   'reviewer_evidence_uncommitted', 'reviewer_learning_evidence_required', 'reviewer_create_scope',
   'reviewer_stale_base', 'reviewer_operation_invalid', 'reviewer_operation_incomplete',
   'reviewer_patch_base_required', 'reviewer_create_base_invalid', 'reviewer_operation_evidence_required',
+  'invalid_skill_diff', 'skill_diff_base_mismatch', 'invalid_create_diff', 'invalid_create_frontmatter',
+  'invalid_attachment_operations', 'invalid_attachment_operation', 'invalid_attachment_path', 'invalid_attachment_write',
+  'reviewer_replacement_invalid', 'reviewer_replacement_not_unique', 'reviewer_create_content_invalid',
 ]);
 const LLM_ERRORS = new Set(['MALFORMED_RESPONSE', 'STREAM_CLOSED', 'RATE_LIMITED', 'AUTHENTICATION_FAILED', 'CONTEXT_OVERFLOW']);
 

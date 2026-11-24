@@ -63,8 +63,18 @@ async function fixture(origin) {
 import { writeFileSync } from 'node:fs';
 import { mountDashboard } from './dashboard.js';
 const uri = ${JSON.stringify(uri)};
-export const inject = ['connection'];
-export function apply(ctx) {
+export const inject = ['connection', 'agents', 'sessions', 'sessionController', 'workspaceController'];
+export async function apply(ctx) {
+  const { workspace } = await ctx.workspaceController.create({ path: ${JSON.stringify(join(root, 'Documents'))} });
+  for (const id of ['fixture-current', 'fixture-newest']) {
+    await ctx.sessionController.create({ sessionId: id, workspaceId: workspace.workspaceId });
+    const agent = ctx.agents.get(id);
+    agent.session.append('turn/start', { turn: 1 });
+    agent.session.append('user/message', { id: id + '-message', role: 'user', source: { kind: 'user' },
+      content: [{ type: 'text', text: id }] }, { surfaceOp: 'append' });
+    agent.session.append('session/title', { title: id, messageSeqs: [], source: { kind: 'user' } });
+    await ctx.sessions.flush(agent.session);
+  }
   const state = {
     status: { state: 'idle' }, settings: { mode: 'auto', modes: ['auto', 'shadow', 'off'], revision: 1, effectiveMode: 'shadow', writeConnection: 'unavailable' },
     history: [], proposals: [{ id: 'fixture-proposal', uri, status: 'pending', summary: 'Tighten instructions', actions: ['preview', 'approve'] }],
@@ -79,8 +89,16 @@ export function apply(ctx) {
       return result('applied');
     },
     preview: () => ({diff: '-old line\\n+new line'}),
-    approve: () => { Object.assign(state.proposals[0], {status: 'applied', actions: ['preview', 'rollback']}); return result('applied'); },
-    rollback: () => { Object.assign(state.proposals[0], {status: 'restored', actions: ['preview']}); return result('restored'); },
+    approve: () => {
+      Object.assign(state.proposals[0], { status: 'applied', actions: ['preview', 'rollback'],
+        history: [{ status: 'index_unconfirmed' }, { status: 'applied' }] });
+      return result('applied');
+    },
+    rollback: () => {
+      Object.assign(state.proposals[0], { status: 'rolled_back', actions: ['preview'],
+        history: [{ status: 'index_unconfirmed' }, { status: 'rolled_back' }] });
+      return result('rolled_back');
+    },
     reject: () => { throw Error('disabled action dispatched'); },
     curator: () => { state.curator.status = 'ready'; return result('ready'); },
     adopt: input => { state.curator.skills = [{ uri: input.uri, status: 'active' }]; return result('active'); },
@@ -103,11 +121,13 @@ async function connectDebugger(endpoint) {
     socket.addEventListener('error', reject, { once: true });
   });
   const waiting = new Map();
+  const events = new Map();
   const exceptions = [];
   let id = 0;
   socket.addEventListener('message', ({ data }) => {
     const message = JSON.parse(data);
     waiting.get(message.id)?.(message);
+    events.get(message.method)?.(message.params);
     if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails.text);
   });
   async function cdp(method, params) {
@@ -123,8 +143,21 @@ async function connectDebugger(endpoint) {
       socket.send(JSON.stringify({ id: requestId, method, params }));
     });
   }
+  function nextEvent(method) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        events.delete(method);
+        reject(Error(`CDP event timeout: ${method}`));
+      }, 5000);
+      events.set(method, params => {
+        clearTimeout(timer);
+        events.delete(method);
+        resolve(params);
+      });
+    });
+  }
   await cdp('Runtime.enable');
-  return { cdp, exceptions };
+  return { cdp, exceptions, nextEvent };
 }
 
 try {
@@ -166,7 +199,7 @@ try {
     return info.split('\n')[0];
   }, 'isolated Chrome debugger');
   const [tab] = await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();
-  const { cdp, exceptions } = await connectDebugger(tab.webSocketDebuggerUrl);
+  const { cdp, exceptions, nextEvent } = await connectDebugger(tab.webSocketDebuggerUrl);
   const evaluate = async expression => {
     const reply = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
     if (reply.exceptionDetails) throw Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
@@ -178,6 +211,12 @@ try {
     if (!button) return false;
     button.click(); return true;
   })()`), `button ${label}`);
+  async function keyPress(key, code, virtualKeyCode, text) {
+    const fields = { key, code, windowsVirtualKeyCode: virtualKeyCode, nativeVirtualKeyCode: virtualKeyCode };
+    await cdp('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', ...fields, text });
+    await cdp('Input.dispatchKeyEvent', { type: 'keyUp', ...fields });
+  }
+  const enter = () => keyPress('Enter', 'Enter', 13);
   const panel = `document.querySelector('.ove-dashboard')`;
   const inPanel = (label) => press(label, `(${panel} ?? document.createElement('div'))`);
   const text = (label) => retry(() => evaluate(`${panel}?.innerText.includes(${JSON.stringify(label)})`), `dashboard text ${label}`);
@@ -188,10 +227,24 @@ try {
     input.dispatchEvent(new Event(input.tagName === 'SELECT' ? 'change' : 'input', {bubbles: true}));
   })()`);
   try {
-    await retry(() => evaluate(`document.body?.innerText.includes('默认工作区')`), 'workspace');
     await press('继续');
     await retry(() => evaluate(`!document.body?.innerText.includes('预览版说明')`), 'dismissed welcome');
-    await evaluate(`(document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent('keydown', { key: ',', code: 'Comma', metaKey: true, altKey: true, bubbles: true, cancelable: true }))`);
+    const openSettings = () => evaluate(`(document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent('keydown', { key: ',', code: 'Comma', metaKey: true, altKey: true, bubbles: true, cancelable: true }))`);
+    await openSettings();
+    await press('技能演进');
+    await text('打开一个会话，或输入会话 ID 后再运行复盘。');
+    assert.equal(await evaluate(`${panel}.querySelector('input[placeholder="输入会话 ID"]').value`), '');
+    assert.equal(await evaluate(`[...${panel}.querySelectorAll('button')].find(button => button.textContent === '运行复盘').disabled`), true);
+    await press('关闭');
+    await retry(() => evaluate(`!${panel}`), 'closed Settings');
+    await retry(() => evaluate(`(() => {
+      const row = document.querySelector('[data-row-key="session:fixture-current"]');
+      if (!row?.getClientRects().length) return false;
+      row.click();
+      return true;
+    })()`), 'open older fixture session');
+    await retry(() => evaluate(`document.title.includes('fixture-current')`), 'older fixture session active');
+    await openSettings();
     await press('技能演进');
   } catch (error) {
     console.error(await evaluate(`({text:document.body?.innerText?.slice(0,1500), buttons:[...document.querySelectorAll('button')].slice(0,25).map(b=>[b.textContent.trim(), b.title,b.getAttribute('aria-label')])})`));
@@ -200,23 +253,63 @@ try {
   }
   await text('技能治理');
   await text('当前实际行为 · 只保存草稿');
+  await cdp('Fetch.enable', { patterns: [{ urlPattern: origin + path }] });
+  const [paused] = await Promise.all([nextEvent('Fetch.requestPaused'), inPanel('刷新')]);
+  assert.equal(paused.request.method, 'GET');
+  assert.equal(await evaluate(`${panel}.querySelector('header button').disabled`), true, 'Refresh stays disabled while the request is pending');
+  assert.equal(await evaluate(`${panel}.querySelector('[role="status"]')?.textContent`), '正在刷新仪表板…');
+  await cdp('Fetch.failRequest', { requestId: paused.requestId, errorReason: 'InternetDisconnected' });
+  await cdp('Fetch.disable');
+  await text('与主机的连接中断。');
+  await inPanel('刷新');
+  await retry(() => evaluate(`!${panel}.querySelector('[role="alert"]') && !${panel}.querySelector('header button').disabled`), 'dashboard recovered after refresh');
   assert(await evaluate(`${panel}.innerText.includes('输入 token') && ${panel}.innerText.includes('记忆')`));
-  await fill('会话 ID', 'fixture-session');
   await inPanel('运行复盘');
-  await text('fixture-session');
-  await inPanel('预览');
+  const getHistory = async () => (await (await fetch(origin + path, { headers: { Cookie: cookie } })).json()).data.history;
+  await retry(async () => (await getHistory()).length === 1, 'recorded dashboard run');
+  assert.deepEqual(await getHistory(), [{ id: 'fixture-current', status: 'ready' }]);
+  await fill('会话 ID', '  fixture-newest  ');
+  await inPanel('运行复盘');
+  await text('fixture-newest');
+  assert.deepEqual((await getHistory()).map(item => item.id), ['fixture-current', 'fixture-newest']);
+  await evaluate(`[...${panel}.querySelectorAll('button')].find(button => button.textContent === '预览').focus()`);
+  assert.equal(await evaluate(`document.activeElement.textContent`), '预览');
+  await enter();
   await text('+new line');
+  await inPanel('关闭');
+  await evaluate(`(() => {
+    const button = [...${panel}.querySelectorAll('button')].find(button => button.textContent === '预览');
+    button.dataset.activationCount = 0;
+    button.addEventListener('click', () => { button.dataset.activationCount = Number(button.dataset.activationCount) + 1; });
+    button.focus();
+  })()`);
+  await keyPress('Enter', 'Enter', 13, '\r');
+  await text('+new line');
+  assert.equal(await evaluate(`[...${panel}.querySelectorAll('button')].find(button => button.textContent === '预览').dataset.activationCount`), '1');
   await inPanel('批准');
   await inPanel('取消');
   await inPanel('批准');
   await inPanel('确认');
+  await text('技能版本已核验，搜索索引尚未确认。');
   await inPanel('回滚');
   await inPanel('确认');
-  await text('已恢复');
+  await text('已回滚');
+  await text('已核验技能移除，搜索索引尚未确认。');
+  assert.equal(await evaluate(`${panel}.innerText.includes('技能版本已核验，搜索索引尚未确认。')`), false);
   assert.equal(await evaluate(`${panel}.querySelector('.ove-advanced').open`), false);
   assert.equal(await evaluate(`${panel}.querySelector('.ove-advanced input').getClientRects().length`), 0);
   await fill('复盘模式', 'shadow');
-  await evaluate(`${panel}.querySelector('.ove-advanced summary').click()`);
+  await evaluate(`${panel}.querySelector('select').focus()`);
+  await keyPress('Tab', 'Tab', 9);
+  assert.equal(await evaluate(`document.activeElement.matches('.ove-advanced summary')`), true);
+  await enter();
+  await retry(() => evaluate(`${panel}.querySelector('.ove-advanced').open`), 'advanced settings opened by Enter');
+  await keyPress(' ', 'Space', 32, ' ');
+  assert.equal(await evaluate(`${panel}.querySelector('.ove-advanced').open`), false, 'native Space still closes the focused disclosure');
+  await keyPress('Enter', 'Enter', 13, '\r');
+  assert.equal(await evaluate(`${panel}.querySelector('.ove-advanced').open`), true, 'full Enter sequence toggles the disclosure once');
+  await keyPress('Tab', 'Tab', 9);
+  assert.equal(await evaluate(`document.activeElement === ${panel}.querySelector('.ove-advanced input')`), true);
   await fill('轮次上限', '12');
   await fill('工具调用上限', '15');
   await fill('失败次数上限', '4');

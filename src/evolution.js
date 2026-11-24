@@ -8,7 +8,7 @@ import { mountDashboard } from './dashboard.js';
 import { isSkillUri } from './evidence.js';
 import { createGovernance } from './governance.js';
 import { memoryLinkProjection, memoryLinkStatus } from './memory-link.js';
-import { applyCreateDiff, applySkillDiff, listReviewCandidates, review } from './review.js';
+import { applyCreateDiff, applySkillDiff, buildCreateDiff, buildReplacementDiff, listReviewCandidates, review } from './review.js';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const sessionKey = session => String(session.id);
@@ -22,6 +22,44 @@ const automaticEvidence = {
   },
 };
 
+function latestRead(state, uri) {
+  return state.evidence.findLast(event => event.type === 'tool/result' &&
+    (event.uri === uri || event.requestedUris?.includes(uri) ||
+     event.requestedUris?.includes(uri.replace(/^viking:\/\/user\/[^/]+/, 'viking://~'))));
+}
+
+function reviewBases(state) {
+  const bases = [];
+  let remaining = 12000;
+  for (const item of state.evidence.filter(event => event.uri).slice(-8).reverse()) {
+    if (latestRead(state, item.uri) !== item) continue;
+    const body = item.body.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
+    const limit = Math.min(remaining, body.length);
+    const end = limit === body.length ? limit : body.lastIndexOf('\n', limit - 1) + 1;
+    if (end <= 0) continue;
+    const bodyExcerpt = body.slice(0, end);
+    remaining -= bodyExcerpt.length;
+    bases.push({ uri: item.uri, seq: item.seq, sha256: digest(item.body), bodyExcerpt, truncated: end !== body.length });
+    if (remaining <= 0) break;
+  }
+  return bases;
+}
+
+function compileReviewOperation(operation, state) {
+  if (!operation || !isSkillUri(operation.uri)) return operation;
+  if (operation.action === 'create' && (Object.hasOwn(operation, 'body') || Object.hasOwn(operation, 'description'))) {
+    if (Object.hasOwn(operation, 'diff')) throw Error('reviewer_operation_invalid');
+    return { ...operation, diff: buildCreateDiff(operation.uri, operation) };
+  }
+  if (operation.action === 'patch' && Object.hasOwn(operation, 'replacement')) {
+    if (Object.hasOwn(operation, 'diff')) throw Error('reviewer_operation_invalid');
+    const base = latestRead(state, operation.uri);
+    if (base?.uri !== operation.uri || digest(base.body) !== operation.baseSha256) throw Error('reviewer_stale_base');
+    return { ...operation, diff: buildReplacementDiff(base.body, operation.uri, operation.replacement) };
+  }
+  return operation;
+}
+
 function validateProposal(proposal, state, belongs) {
   if (!isSkillUri(proposal.uri) || (proposal.diff?.length ?? 0) > 24000 || proposal.reason.length > 1000) throw Error('reviewer_proposal_invalid');
   if (proposal.action === 'create') {
@@ -29,9 +67,7 @@ function validateProposal(proposal, state, belongs) {
     applyCreateDiff(proposal.diff, proposal.uri);
     return proposal;
   }
-  const latest = state.evidence.findLast(event => event.type === 'tool/result' &&
-    (event.uri === proposal.uri || event.requestedUris?.includes(proposal.uri) ||
-     event.requestedUris?.includes(proposal.uri.replace(/^viking:\/\/user\/[^/]+/, 'viking://~'))));
+  const latest = latestRead(state, proposal.uri);
   if (latest?.uri !== proposal.uri || digest(latest.body) !== proposal.baseSha256) throw Error('reviewer_stale_base');
   if (proposal.diff) applySkillDiff(latest.body, proposal.diff, proposal.uri);
   return proposal;
@@ -43,7 +79,8 @@ function bindProposal(output, packet, state, sessionId, belongs) {
   if (!parsed.evidence.every(item => seen.get(item.seq) === item.kind)) throw Error('reviewer_evidence_uncommitted');
   if (parsed.decision !== 'approve') return null;
   if (!parsed.evidence.some(item => ['user/message', 'tool/result'].includes(item.kind))) throw Error('reviewer_learning_evidence_required');
-  const proposal = reviewerOperationToProposal(parsed.proposal, { evidence: { sessionId, sequences: parsed.evidence.map(item => item.seq) } });
+  const operation = compileReviewOperation(parsed.proposal, state);
+  const proposal = reviewerOperationToProposal(operation, { evidence: { sessionId, sequences: parsed.evidence.map(item => item.seq) } });
   return validateProposal(proposal, state, belongs);
 }
 
@@ -94,7 +131,12 @@ export async function mountEvolution(ctx, options, evidence) {
   let running;
   const seen = new Map();
   const queued = new Map();
-  for (const item of governance.history().reverse()) seen.set(item.sessionId, item);
+  const attempts = new Map();
+  const consumesEvidence = item => !['failed', 'cancelled', 'settings_changed', 'disabled', 'review_model_unavailable'].includes(item.status);
+  for (const item of governance.history().reverse()) {
+    attempts.set(item.sessionId, item);
+    if (consumesEvidence(item)) seen.set(item.sessionId, item);
+  }
 
   const background = operation => {
     if (scope.signal.aborted) return;
@@ -134,7 +176,11 @@ export async function mountEvolution(ctx, options, evidence) {
     if (config.mode === 'off') return { status: 'disabled' };
     if (running) return { status: 'busy' };
     if (previous && seq <= previous.seq) return { status: 'deduped' };
-    if (source === 'automatic' && previous && Date.now() - Date.parse(previous.at) < config.cooldownMs) return { status: 'cooldown' };
+    const lastAttempt = attempts.get(sessionId);
+    if (source === 'automatic' && lastAttempt) {
+      if (seq <= lastAttempt.seq) return { status: 'deduped' };
+      if (Date.now() - Date.parse(lastAttempt.at) < config.cooldownMs) return { status: 'cooldown' };
+    }
     if (seq < 0) return { status: 'no_evidence' };
     const at = new Date().toISOString();
     const started = Date.now();
@@ -155,10 +201,13 @@ export async function mountEvolution(ctx, options, evidence) {
         provider = config.provider || sourceModel?.provider || agent.provider || agent.model?.provider;
         model = config.model || sourceModel?.model || (typeof agent.model === 'string' ? agent.model : agent.model?.id);
         const llm = ctx.get('llm');
-        if (!provider || !model || !llm) return { status: 'review_model_unavailable' };
+        if (!provider || !model || !llm) {
+          outcome = { status: 'review_model_unavailable' };
+          return outcome;
+        }
         const reviewer = createDshReviewAdapter({ llm, provider, model, sessionId });
         const packet = buildEvidencePacket(policy);
-        const bases = snapshot.evidence.filter(item => item.uri).slice(-8).map(item => ({ uri: item.uri, seq: item.seq, sha256: digest(item.body) }));
+        const bases = reviewBases(snapshot);
         trace = createReviewStreamTrace();
         stage = 'stream';
         const output = await reviewer({ packet, bases, owner: options.owner ?? resolveConnection?.()?.owner, signal, onChunk: trace.onChunk });
@@ -171,7 +220,7 @@ export async function mountEvolution(ctx, options, evidence) {
       return outcome;
     } catch (error) {
       errorCode = reviewStreamErrorCode(error, signal);
-      outcome = { status: signal.aborted ? 'cancelled' : 'failed', reason: signal.aborted ? signal.reason?.name : error.name };
+      outcome = { status: signal.aborted ? 'cancelled' : 'failed', reason: errorCode, ...(stage ? { stage } : {}) };
       return outcome;
     } finally {
       try {
@@ -183,8 +232,8 @@ export async function mountEvolution(ctx, options, evidence) {
             await streamLog.write({ version: 1, at, durationMs: Date.now() - started, sessionId, source, status: outcome.status, ...stream }).catch(logWarning);
           }
           await governance.log(row);
-          seen.set(sessionId, row);
-          // The next window begins after the durably journaled sequence.
+          attempts.set(sessionId, row);
+          if (consumesEvidence(row)) seen.set(sessionId, row);
         }
       } finally {
         running = undefined;
@@ -284,7 +333,18 @@ export async function mountEvolution(ctx, options, evidence) {
   });
 
   const actions = {
-    run: (input, { signal }) => run(agentById.get(input.sessionId ?? selected), 'manual', signal),
+    async run(input, { signal }) {
+      const id = typeof input.sessionId === 'string' ? input.sessionId.trim() : '';
+      if (!id) return { status: 'no_session' };
+      if (running) return { status: 'busy' };
+      const agents = ctx.get('agents');
+      const controller = ctx.get('sessionController');
+      const agent = controller?.resolveAgent
+        ? (await controller.resolveAgent(id)).agent
+        : agents?.get(id) ?? agentById.get(id);
+      signal.throwIfAborted();
+      return run(agent, 'manual', signal);
+    },
     settings: input => governance.update(input),
     preview: input => governance.preview(input.id),
     curator: async () => (await getCurator()).scan({ manual: true }),
@@ -308,7 +368,7 @@ export async function mountEvolution(ctx, options, evidence) {
         sessionId: running?.sessionId ?? selected, lastRun: history[0]?.at }, settings, history,
       proposals: await governance.proposals(), ...skillState,
       memory: session ? memoryLinkStatus(session, memory.stateOf(session), ctx.get('openvikingMemory')) : { state: 'unobserved' },
-      capabilities: { run: agentById.size > 0 && settings.mode !== 'off', settings: true, preview: true,
+      capabilities: { run: settings.mode !== 'off' && Boolean(ctx.get('sessionController')?.resolveAgent || ctx.get('agents') || agentById.size), settings: true, preview: true,
         approve: governance.canWrite, reject: governance.canWrite, rollback: governance.canWrite, curator: true,
         adopt: canManage, archive: canManage, restore: canManage } };
     } });

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { lstat, readFile, realpath, writeFile, rename } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 
-export const inject = ['agents', 'commands', 'sessions', 'pluginManager', 'profileContext', 'hmr'];
+export const inject = ['agents', 'commands', 'sessions', 'pluginManager', 'profileContext', 'hmr', 'connection', 'webServer'];
 
 export function apply(ctx) {
   // Cancel delayed work from any instance replaced during profile composition.
@@ -60,6 +60,19 @@ export function apply(ctx) {
       for (const name of ['skill-approve', 'skill-reject', 'skill-rollback']) assert.equal(command(name), undefined);
 
       if (previous === undefined) {
+        const origin = `http://127.0.0.1:${ctx.webServer.port}`;
+        const login = await fetch(ctx.connection.authenticatedUrl(origin), { redirect: 'manual' });
+        const cookie = login.headers.get('set-cookie')?.split(';')[0];
+        assert(cookie, 'fixture login established an owner session');
+        const url = `${origin}/api/dsh-openviking-skill-evolution/dashboard`;
+        const snapshot = await fetch(url, { headers: { Cookie: cookie } });
+        assert.equal(snapshot.status, 200);
+        assert.equal((await snapshot.json()).data.capabilities.run, true);
+        const run = await fetch(url, { method: 'POST', headers: { Cookie: cookie, Origin: origin, 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'run', input: { sessionId } }) });
+        assert.equal(run.status, 200);
+        assert.deepEqual(await run.json(), { ok: true, data: { status: 'no_evidence' } });
+        steps.push('dashboard can review a session created before bundle installation');
         const proposalId = await checkProposal(session, outcome, uri);
         await ctx.sessions.flush(session);
         steps.push('shadow proposal and deduplication');

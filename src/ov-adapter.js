@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { skillArchive, validPackagePath } from './skill-archive.js';
+
+export class SkillSnapshotConflict extends Error {}
 
 const MAX_BYTES = 16 * 1024 * 1024;
 const sha256 = data => createHash('sha256').update(data).digest('hex');
@@ -112,10 +115,10 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
       ...(next.metadata.source ? { source_metadata: next.metadata.source } : {}) });
   }
 
-  async function indexedSkills() {
+  async function indexedSkills(scope) {
     const response = await json('/api/v1/skills/find', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: skill, target_uri: target, limit: 20, score_threshold: 0 }),
+      body: JSON.stringify({ query: skill, target_uri: scope, limit: 20, score_threshold: 0 }),
     });
     if (!Array.isArray(response.skills)) throw Error('Unexpected skill index response');
     return response.skills.filter(item => [managedUri, packageUri].includes(item.root_uri ?? item.uri));
@@ -156,7 +159,7 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
     },
     async verifyAbsent(uri) {
       requireManaged(uri);
-      return (await indexedSkills()).length === 0;
+      return (await indexedSkills(target)).length === 0;
     },
     async preflight(uri, next) {
       requireManaged(uri);
@@ -169,10 +172,7 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
       if (!body) return false;
       if (mode === 'native-verified-readback') {
         const live = await read(uri);
-        if (!live || live.body !== previous.body || JSON.stringify(live.metadata) !== JSON.stringify(previous.metadata) ||
-            JSON.stringify(Object.entries(live.files).sort()) !== JSON.stringify(Object.entries(previous.files).sort())) {
-          throw Error('Skill changed during archive upload');
-        }
+        if (!isDeepStrictEqual(live, previous)) throw new SkillSnapshotConflict('Skill changed during archive upload');
         if (signal?.aborted) return false;
       }
       await json(endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body });
@@ -181,7 +181,7 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
       requireManaged(uri);
       const detail = await detailOfSkill();
       if (detail.content_sha256 !== sha256(snapshot.body)) return false;
-      return (await indexedSkills()).some(item => item.description === detail.description);
+      return (await indexedSkills(packageUri)).some(item => item.description === detail.description);
     },
   };
 }

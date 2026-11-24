@@ -58,7 +58,7 @@ export function apply(ctx) {
     prepareCall: async () => ({ model, stream: async function* ({ messages }) {
       const payload = JSON.parse(messages.at(-1).content[0].text);
       const evidence = payload.events.filter(event => event.type === 'tool/result' || event.type === 'user/message');
-      yield { type: 'text-delta', index: 0, text: JSON.stringify({ decision: 'approve', reason: 'Fixture evidence supports a bounded correction.', evidence: evidence.map(event => ({ seq: event.seq, kind: event.type })), proposal: { action: 'patch', uri: ${JSON.stringify(uri)}, baseSha256: ${JSON.stringify(sha256(body))}, reason: 'Clarify the smoke instruction.', diff: ${JSON.stringify(patch)}, operations: [${JSON.stringify(attachment)}] } }) };
+      yield { type: 'text-delta', index: 0, text: JSON.stringify({ decision: 'approve', reason: 'Fixture evidence supports a bounded correction.', evidence: evidence.map(event => ({ seq: event.seq, kind: event.type })), proposal: { action: 'patch', uri: ${JSON.stringify(uri)}, baseSha256: ${JSON.stringify(sha256(body))}, reason: 'Clarify the smoke instruction.', replacement: { before: ['Run smoke.'], after: ['Run smoke and check exit status.'] }, operations: [${JSON.stringify(attachment)}] } }) };
       yield { type: 'finish', reason: { kind: 'stop' } };
     } })
   });
@@ -171,6 +171,21 @@ async function runGeneration(root, generation, overlay, port) {
   }
 }
 
+async function connectDashboard({ logs, port }) {
+  const loginUrl = logs.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=[^\s]+/)?.[0];
+  assert(loginUrl, 'DSH login URL missing');
+  const login = await fetch(loginUrl, { redirect: 'manual' });
+  const cookie = login.headers.get('set-cookie')?.split(';', 1)[0];
+  assert(cookie, 'DSH owner cookie missing');
+  const url = new URL(`http://127.0.0.1:${port}/api/dsh-openviking-skill-evolution/dashboard`);
+  const action = async (action, input) => {
+    const response = await fetch(url, { method: 'POST', headers: { Cookie: cookie, Origin: url.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ action, input }) });
+    assert.equal(response.status, 200);
+    return (await response.json()).data;
+  };
+  return { url, cookie, action };
+}
+
 test('isolated DSH Web v0.2 lifecycle, fixture inference, dashboard modes and restart', { timeout: 90000 }, async t => {
   if (!runtime || !install) {
     t.skip('Set DSH_NODE_EXECUTABLE and DSH_INSTALL_DIR to run the isolated DSH fixture.');
@@ -187,12 +202,7 @@ test('isolated DSH Web v0.2 lifecycle, fixture inference, dashboard modes and re
     const port = await freePort();
     const first = await runGeneration(root, 1, overlay, port);
     child = first.child;
-    const loginUrl = first.logs.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=[^\s]+/)?.[0];
-    assert(loginUrl, 'DSH login URL missing');
-    const login = await fetch(loginUrl.trim(), { redirect: 'manual' });
-    const cookie = login.headers.get('set-cookie')?.split(';', 1)[0];
-    assert(cookie, 'DSH owner cookie missing');
-    const dashboardUrl = `http://127.0.0.1:${port}/api/dsh-openviking-skill-evolution/dashboard`;
+    const { url: dashboardUrl, cookie, action } = await connectDashboard(first);
     const dashboard = await fetch(dashboardUrl, { headers: { Cookie: cookie } });
     assert.equal(dashboard.status, 200);
     const dashboardData = await dashboard.json();
@@ -206,11 +216,6 @@ test('isolated DSH Web v0.2 lifecycle, fixture inference, dashboard modes and re
     assert.equal(firstRows[0].manual.status, foreground ? 'foreground' : 'deduped', JSON.stringify(firstRows[0]));
     assert.equal(dashboardData.data.proposals[0]?.status, nativeAdapter ? 'applied' : 'pending', JSON.stringify(dashboardData.data.history));
     const id = dashboardData.data.proposals[0].id;
-    const action = async (action, input) => {
-      const response = await fetch(dashboardUrl, { method: 'POST', headers: { Cookie: cookie, Origin: new URL(dashboardUrl).origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ action, input }) });
-      assert.equal(response.status, 200);
-      return (await response.json()).data;
-    };
     const preview = await action('preview', { id });
     assert.match(preview.diff, /\+Run smoke and check exit status\./);
     assert.deepEqual(preview.operations, [attachment]);
@@ -219,10 +224,12 @@ test('isolated DSH Web v0.2 lifecycle, fixture inference, dashboard modes and re
       assert.equal(inspection.value?.status, 'read', JSON.stringify(inspection));
       assert.equal(learned.value?.proposalId, id, JSON.stringify(learned));
     }
-    if (!nativeAdapter) assert.equal((await action('approve', { id })).status, 'applied');
-    if (nativeAdapter) assert.deepEqual(await nativeAdapter.read(uri), { ...baseline, body: changedBody, files: { ...baseline.files, [attachment.path]: Buffer.from(attachment.content).toString('base64') }, metadata: { ...baseline.metadata, directories: [...new Set([...baseline.metadata.directories, 'references'])].sort() } });
-    assert.equal((await action('rollback', { id })).status, 'rolled_back');
-    if (nativeAdapter) assert.deepEqual(await nativeAdapter.read(uri), baseline);
+    if (nativeAdapter) {
+      assert.deepEqual(await nativeAdapter.read(uri), { ...baseline, body: changedBody, files: { ...baseline.files, [attachment.path]: Buffer.from(attachment.content).toString('base64') }, metadata: { ...baseline.metadata, directories: [...new Set([...baseline.metadata.directories, 'references'])].sort() } });
+    } else {
+      assert.equal((await action('approve', { id })).status, 'applied');
+      assert.equal((await action('rollback', { id })).status, 'rolled_back');
+    }
     assert.equal((await action('settings', { revision: 0, mode: 'shadow' })).status, 'saved');
     const ledger = JSON.parse(await readFile(join(root, 'governance.json'), 'utf8'));
     assert.equal(ledger.settings.mode, 'shadow');
@@ -241,6 +248,14 @@ test('isolated DSH Web v0.2 lifecycle, fixture inference, dashboard modes and re
     const persisted = JSON.parse(await readFile(join(root, 'governance.json'), 'utf8'));
     assert.equal(persisted.runs.length, foreground ? 0 : 1);
     assert.equal(persisted.owner, nativeAdapter ? null : owner);
+    if (nativeAdapter) {
+      const reopened = await connectDashboard(second);
+      const previewAfterRestart = await reopened.action('preview', { id });
+      assert.equal(previewAfterRestart.diff, preview.diff);
+      assert.deepEqual(previewAfterRestart.operations, [attachment]);
+      assert.equal((await reopened.action('rollback', { id })).status, 'rolled_back');
+      assert.deepEqual(await nativeAdapter.read(uri), baseline);
+    }
   } finally {
     child?.kill('SIGTERM');
     await delay(300);
