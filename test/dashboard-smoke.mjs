@@ -80,8 +80,12 @@ export async function apply(ctx) {
     status: { state: 'idle', lastRun: ${JSON.stringify(fixtureTime)} }, settings: { mode: 'auto', modes: ['auto', 'shadow', 'off'], revision: 1, effectiveMode: 'shadow', writeConnection: 'unavailable', maxDurationMs: 1800000, reviewTimeoutMs: 300000, provider: '', model: '' },
     history: [], proposals: [{ id: 'fixture-proposal', uri, status: 'pending', summary: 'Tighten instructions', createdAt: ${JSON.stringify(fixtureTime)}, actions: ['preview', 'approve'] },
       ...['fixture-p2', 'fixture-p3', 'fixture-p4', 'fixture-p5'].map(id => ({ id, title: id, status: 'shadow' }))],
-    usage: { inputTokens: 41, skills: [{ uri, count: 2, lastUsed: Date.parse(${JSON.stringify(fixtureTime)}) }] },
-    curator: { skills: [], nextScan: Date.parse(${JSON.stringify(fixtureTime)}), audit: [{ at: Date.parse(${JSON.stringify(fixtureTime)}), status: 'ready' }] }, memory: { status: 'ready' },
+    preservedVersions: [],
+    usage: { skills: [{ uri, loads: 2, lastUsed: Date.parse(${JSON.stringify(fixtureTime)}) }] },
+    curator: { skills: [], nextScan: Date.parse(${JSON.stringify(fixtureTime)}), audit: [{ at: Date.parse(${JSON.stringify(fixtureTime)}), status: 'ready' }] },
+    memory: { connection: 'observed', state: 'linked', dshSessionId: 'fixture-current', ovSessionId: 'fixture-ov-diagnostic',
+      recall: { enabled: true, scope: 'actor', lastInjectedSeq: 7 },
+      capture: { enabled: true, toolResultsEnabled: false, hasPendingWrites: false, remoteCommit: 'unverified' } },
   };
   const result = status => ({ status });
   const actions = {
@@ -109,13 +113,24 @@ export async function apply(ctx) {
       return result('rolled_back');
     },
     reject: () => { throw Error('disabled action dispatched'); },
+    clearProposals: ({ confirm }) => {
+      if (confirm !== true) throw Error('missing clear confirmation');
+      state.preservedVersions = state.proposals.filter(item => item.status === 'rolled_back');
+      return { status: 'proposals_cleared', count: state.proposals.splice(0).length };
+    },
+    clearHistory: ({ confirm }) => {
+      if (confirm !== true) throw Error('missing clear confirmation');
+      return { status: 'history_cleared', count: state.history.splice(0).length };
+    },
     curator: () => { state.curator.status = 'ready'; return result('ready'); },
     adopt: input => { state.curator.skills = [{ uri: input.uri, status: 'active' }]; return result('active'); },
     archive: () => { state.curator.skills[0].status = 'archived'; return result('archived'); },
     restore: () => { state.curator.skills[0].status = 'active'; return result('active'); },
   };
   state.capabilities = Object.fromEntries(Object.keys(actions).map(key => [key, key !== 'reject']));
-  mountDashboard(ctx, { snapshot: () => state, actions });
+  mountDashboard(ctx, { snapshot: ({ sessionId } = {}) => ({
+    ...state, memory: sessionId === 'fixture-current' ? state.memory : { connection: 'observed', state: sessionId ? 'unobserved' : 'no_session' },
+  }), actions });
   writeFileSync(${JSON.stringify(join(root, 'login'))}, ctx.connection.authenticatedUrl(${JSON.stringify(origin)}), {mode: 0o600});
 }`);
   const patch = join(root, 'overlay.yml');
@@ -243,6 +258,8 @@ try {
     await openSettings();
     await press('技能演进');
     await text('打开一个会话，或输入会话 ID 后再运行复盘。');
+    await text('未选中会话');
+    await text('已检测到连接');
     assert.equal(await evaluate(`${panel}.querySelector('input[placeholder="输入会话 ID"]').value`), '');
     assert.equal(await evaluate(`[...${panel}.querySelectorAll('button')].find(button => button.textContent === '运行复盘').disabled`), true);
     await press('关闭');
@@ -263,9 +280,11 @@ try {
   }
   await text('技能治理');
   await text('当前实际行为 · 只保存草稿');
-  await cdp('Fetch.enable', { patterns: [{ urlPattern: origin + path }] });
+  await text('未完整设置复盘模型，当前使用来源会话的模型。');
+  await cdp('Fetch.enable', { patterns: [{ urlPattern: origin + path + '*', requestStage: 'Request' }] });
   const [paused] = await Promise.all([nextEvent('Fetch.requestPaused'), inPanel('刷新')]);
   assert.equal(paused.request.method, 'GET');
+  assert.equal(new URL(paused.request.url).searchParams.get('sessionId'), 'fixture-current');
   assert.equal(await evaluate(`${panel}.querySelector('header button').disabled`), true, 'Refresh stays disabled while the request is pending');
   assert.equal(await evaluate(`${panel}.querySelector('[role="status"]')?.textContent`), '正在刷新仪表板…');
   await cdp('Fetch.failRequest', { requestId: paused.requestId, errorReason: 'InternetDisconnected' });
@@ -273,7 +292,10 @@ try {
   await text('与主机的连接中断。');
   await inPanel('刷新');
   await retry(() => evaluate(`!${panel}.querySelector('[role="alert"]') && !${panel}.querySelector('header button').disabled`), 'dashboard recovered after refresh');
-  assert(await evaluate(`${panel}.innerText.includes('输入 token') && ${panel}.innerText.includes('记忆')`));
+  for (const copy of ['技能使用情况', '加载次数 · 2', '最近使用', '已检测到连接', '已关联', '为此会话检索记忆', '当前代理', '将会话写入记忆', '没有待写入项目']) await text(copy);
+  assert.equal(await evaluate(`${panel}.innerText.includes('fixture-ov-diagnostic')`), false);
+  await evaluate(`[...${panel}.querySelectorAll('summary')].find(item => item.textContent === '技术详情').click()`);
+  await text('fixture-ov-diagnostic');
   await inPanel('运行复盘');
   const getHistory = async () => (await (await fetch(origin + path, { headers: { Cookie: cookie } })).json()).data.history;
   await retry(async () => (await getHistory()).length === 1, 'recorded dashboard run');
@@ -348,9 +370,10 @@ try {
   assert.equal(await evaluate(`${panel}.querySelector('.ove-advanced').open`), true, 'full Enter sequence toggles the disclosure once');
   await keyPress('Tab', 'Tab', 9);
   assert.equal(await evaluate(`document.activeElement === ${panel}.querySelector('.ove-advanced input')`), true);
-  await fill('轮次上限', '12');
-  await fill('工具调用上限', '15');
-  await fill('失败次数上限', '4');
+  await text('任一项达到设定值');
+  await fill('会话达到多少轮后触发复盘', '12');
+  await fill('会话调用工具多少次后触发复盘', '15');
+  await fill('会话出现多少次错误后触发复盘', '4');
   await fill('自动复盘最短间隔（分钟）', '2.5');
   assert.equal(await evaluate(`[...${panel}.querySelectorAll('.ove-advanced input')].find(input => input.parentElement.textContent.includes('复盘触发时长（分钟）')).value`), '30');
   assert.equal(await evaluate(`[...${panel}.querySelectorAll('.ove-advanced input')].find(input => input.parentElement.textContent.includes('模型复盘超时（秒）')).value`), '300');
@@ -375,8 +398,24 @@ try {
     maxTurns: 12, maxToolCalls: 15, maxFailures: 4, cooldownMs: 150000, maxDurationMs: 90_000, reviewTimeoutMs: 45_500,
     provider: 'fixture-provider', model: 'fixture-model', correctionWords: ['before', 'after'],
   });
+  await inPanel('清空运行历史');
+  await text('清空显示的运行历史？');
+  await inPanel('取消');
+  assert.equal((await getHistory()).length, 5);
+  await inPanel('清空运行历史');
+  await inPanel('确认');
+  await text('暂无复盘记录。');
+  assert.deepEqual(await getHistory(), []);
+  assert.equal(await visible(latestRows('proposals')), 3);
+  await inPanel('清空提案');
+  await inPanel('确认');
+  await text('暂无提案。');
+  const versions = `${latestRows('versions')}.closest('details')`;
+  assert.equal(await evaluate(`${versions}.open`), false);
+  await evaluate(`${versions}.querySelector('summary').click()`);
+  await text('已回滚');
   assert.deepEqual(exceptions, []);
-  console.log('Native React Settings exercised manual review, history, diff, approval/cancel/rollback, mode change, curator/adopt/archive/restore, usage and memory.');
+  console.log('Native React Settings exercised review, history, approval and rollback, thresholds, curator, usage, memory and both clear actions.');
 } catch (error) {
   // DSH may emit a connect URL during startup. Never dump it to test logs.
   for (const child of children) console.error(child.logs().replace(/https?:\/\/[^\s\x1b]+/g, '[url]'));

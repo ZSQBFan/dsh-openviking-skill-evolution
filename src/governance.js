@@ -37,21 +37,27 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
   try { state = JSON.parse(await readFile(path, 'utf8')); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    state = { version: 1, owner, revision: 0, settings: initialSettings, runs: [], shadows: [] };
+    state = { version: 1, owner, revision: 0, settings: initialSettings, runs: [], durableRuns: [], shadows: [], hiddenProposalIds: [] };
   }
   state.settings = {
     maxDurationMs: initialSettings.maxDurationMs,
     reviewTimeoutMs: initialSettings.reviewTimeoutMs,
     ...state.settings,
   };
-  if (state.version !== 1 || state.owner !== owner || !validSettings(state.settings) || !Array.isArray(state.runs)) {
+  if (state.version !== 1 || state.owner !== owner || !validSettings(state.settings) || !Array.isArray(state.runs) ||
+      (state.durableRuns !== undefined && !Array.isArray(state.durableRuns)) ||
+      (state.hiddenProposalIds !== undefined && (!Array.isArray(state.hiddenProposalIds) ||
+        state.hiddenProposalIds.some(id => typeof id !== 'string')))) {
     throw Error('Invalid persisted governance state');
   }
+  let changed = false;
+  if (!Array.isArray(state.durableRuns)) { state.durableRuns = [...state.runs]; changed = true; }
+  if (!Array.isArray(state.hiddenProposalIds)) { state.hiddenProposalIds = []; changed = true; }
   const runs = await backfillReviewRuns(directory, state.runs);
-  if (runs !== state.runs) {
-    state.runs = runs;
-    await saveState(directory, path, state);
-  }
+  const durableRuns = await backfillReviewRuns(directory, state.durableRuns);
+  if (runs !== state.runs) { state.runs = runs; changed = true; }
+  if (durableRuns !== state.durableRuns) { state.durableRuns = durableRuns; changed = true; }
+  if (changed) await saveState(directory, path, state);
   if (resolveConnection && state.revision === 0 && state.settings.mode === 'off') state.settings.mode = 'auto';
   const snapshotSettings = () => {
     const active = connection();
@@ -143,25 +149,62 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
         }) };
     },
     log(run) {
-      return mutate(next => { next.runs = [...next.runs, normalizeReviewRun(run)].slice(-MAX_HISTORY); });
+      return mutate(next => {
+        const row = normalizeReviewRun(run);
+        next.runs = [...next.runs, row].slice(-MAX_HISTORY);
+        next.durableRuns = [...(next.durableRuns ?? []), row].slice(-MAX_HISTORY);
+      });
     },
     history: () => structuredClone(state.runs).reverse(),
+    durableHistory: () => structuredClone(state.durableRuns ?? state.runs).reverse(),
+    async clearHistory(input = {}) {
+      if (input?.confirm !== true) return { status: 'invalid_confirm', count: 0 };
+      return mutate(next => {
+        const count = next.runs.length;
+        next.runs = [];
+        return { status: 'history_cleared', count };
+      });
+    },
+    async clearProposals(input = {}) {
+      if (input?.confirm !== true) return { status: 'invalid_confirm', count: 0 };
+      return mutate(async next => {
+        const all = await records();
+        const official = all.map(item => item.proposal.proposalId);
+        const shadow = next.shadows.map(item => item.proposalId);
+        const visible = new Set([...official, ...shadow].filter(id => !next.hiddenProposalIds.includes(id)));
+        next.hiddenProposalIds = [...new Set([...next.hiddenProposalIds, ...visible])];
+        return { status: 'proposals_cleared', count: visible.size };
+      });
+    },
     async proposals() {
       const all = await records();
+      const hidden = new Set(state.hiddenProposalIds ?? []);
       const official = new Set(all.map(item => item.proposal.proposalId));
       const legacyTimes = new Map();
-      for (const run of state.runs) {
+      for (const run of state.durableRuns ?? state.runs) {
         if (run.status === 'shadow' && run.proposalId && !legacyTimes.has(run.proposalId)) legacyTimes.set(run.proposalId, run.at);
       }
       const shadows = state.shadows.filter(item => !official.has(item.proposalId)).map(proposal => ({ status: 'shadow', proposal }));
       const creationTime = value => Number.isFinite(Date.parse(value)) ? Date.parse(value) : Number.MIN_SAFE_INTEGER;
-      return [...all, ...shadows].reverse()
+      return [...all, ...shadows].filter(({ proposal }) => !hidden.has(proposal.proposalId)).reverse()
         .map(({ status, proposal, history }) => ({ id: proposal.proposalId, uri: proposal.uri, status, summary: proposal.reason,
           sessionId: proposal.evidence.sessionId, action: proposal.action, history,
           createdAt: history?.[0]?.at ?? proposal.createdAt ?? legacyTimes.get(proposal.proposalId),
           actions: ['preview', ...(status === 'pending' ? ['approve', 'reject'] : []),
             ...(status === 'applied' || status === 'restoring' ? ['rollback'] : []), ...(status === 'applying' ? ['approve'] : [])] }))
         .sort((left, right) => creationTime(right.createdAt) - creationTime(left.createdAt));
+    },
+    async preservedVersions() {
+      const recoverable = new Set(['applied', 'applying', 'restoring', 'write_unconfirmed', 'index_unconfirmed', 'rollback_conflict']);
+      const hidden = new Set(state.hiddenProposalIds ?? []);
+      return (await records()).filter(record => recoverable.has(record.status) && hidden.has(record.proposal.proposalId)).map(record => {
+        const { proposal } = record;
+        return { id: proposal.proposalId, uri: proposal.uri, status: record.status, summary: proposal.reason,
+          sessionId: proposal.evidence.sessionId, action: proposal.action,
+          createdAt: record.history?.[0]?.at ?? proposal.createdAt,
+          actions: ['preview', ...(record.status === 'applying' ? ['approve'] : []),
+            ...(record.status === 'applied' || record.status === 'restoring' ? ['rollback'] : [])] };
+      });
     },
     async preview(id) {
       if (!HEX.test(id)) return { status: 'invalid_id' };
@@ -176,6 +219,7 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
         const active = connection();
         const record = (await records(active)).find(item => item.proposal.proposalId === id);
         if (!record) return { status: 'missing' };
+        if ((state.hiddenProposalIds ?? []).includes(id) && ['approve', 'reject'].includes(action) && record.status === 'pending') return { status: 'proposal_cleared' };
         const { proposal, approvalDigest: digest } = record;
         const result = await service(proposal.uri, active)[action]({ id, digest, sessionId: proposal.evidence.sessionId, signal });
         return { ...approvalResult(result), uri: proposal.uri, action: proposal.action };

@@ -95,6 +95,17 @@ export const memoryLinkProjection = {
 
 const enabled = (...settings) => !settings.some(value => value === false || (record(value) && value.enabled === false));
 
+export function memoryConnectionStatus(runtime) {
+  if (!runtime) return 'unavailable';
+  if (runtime.config?.enabled === false) return 'disabled';
+  if (runtime.states instanceof Map) {
+    for (const entry of runtime.states.values()) {
+      if (entry?.ready === true) return 'observed';
+    }
+  }
+  return 'configured';
+}
+
 export function memoryLinkStatus(session, projected, runtime) {
   // stateFor() creates state, so only inspect an existing native entry. This is
   // a version-sensitive observation, not a second owner of the OV lifecycle.

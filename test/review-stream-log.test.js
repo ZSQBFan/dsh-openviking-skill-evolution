@@ -7,7 +7,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { mountEvolution } from '../src/evolution.js';
 
-async function fixture(t, chunks, { evidence = [], onRequest, settings = {}, events: eventFixture, agents = [] } = {}) {
+async function fixture(t, chunks, { evidence = [], onRequest, settings = {}, events: eventFixture, agents = [],
+  sessionRoute = { provider: 'session-provider', model: 'session-model' },
+  expectedRoute = { provider: 'fixture-provider', model: 'fixture-model' } } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'skill-review-log-'));
   const logDirectory = join(directory, 'review-stream');
   const hooks = {};
@@ -17,11 +19,11 @@ async function fixture(t, chunks, { evidence = [], onRequest, settings = {}, eve
     await rm(directory, { recursive: true, force: true });
   });
   const events = eventFixture ?? [{ type: 'user/message', seq: 1, data: {} }, { type: 'turn/end', seq: 2, data: {} }];
-  const agent = { session: { id: 'fixture' }, provider: 'main-provider', model: 'main-model' };
+  const agent = { session: { id: 'fixture' }, model: { current: () => sessionRoute } };
   const llm = { async *stream(options) {
     assert.equal(options.purpose, 'automatic-review');
-    assert.equal(options.provider, 'fixture-provider');
-    assert.equal(options.model, 'fixture-model');
+    assert.equal(options.provider, expectedRoute.provider);
+    assert.equal(options.model, expectedRoute.model);
     onRequest?.(JSON.parse(options.messages[0].content[0].text), options);
     yield* (typeof chunks === 'function' ? chunks(options) : chunks);
   } };
@@ -155,15 +157,33 @@ test('failed validation throttles manual and automatic retries across restart wi
   const path = join(f.directory, 'governance.json');
   const stored = JSON.parse(await readFile(path, 'utf8'));
   assert.equal(stored.runs.length, 1);
-  stored.runs[0].finishedAt = new Date(Date.now() - 6 * 60_000).toISOString();
+  const finishedAt = new Date(Date.now() - 6 * 60_000).toISOString();
+  stored.runs[0].finishedAt = finishedAt;
+  stored.durableRuns[0].finishedAt = finishedAt;
   await writeFile(path, JSON.stringify(stored));
   const afterCooldown = await f.mount();
   assert.deepEqual(await afterCooldown.run(f.agent, 'manual'), { status: 'no_change' });
   assert.deepEqual(await afterCooldown.run(f.agent, 'manual'), { status: 'deduped' });
 });
 
-test('an unavailable review model is recorded and the same evidence remains retryable', async t => {
-  const f = await fixture(t, mixed, { settings: { provider: '', model: '' }, onRequest: () => assert.fail('conversation route must not be used') });
+test('review inherits the complete source session route when the override is empty or incomplete', async t => {
+  const expectedRoute = { provider: 'session-provider', model: 'session-model' };
+  for (const [settings, source] of [
+    [{ provider: '', model: '' }, 'automatic'],
+    [{ provider: 'override-provider', model: '' }, 'manual'],
+    [{ provider: ' ', model: 'override-model' }, 'manual'],
+  ]) {
+    const f = await fixture(t, mixed, { settings, sessionRoute: expectedRoute, expectedRoute });
+    const { run } = await f.mount();
+    assert.deepEqual(await run(f.agent, source), { status: 'no_change' });
+    const { runs: [row] } = JSON.parse(await readFile(join(f.directory, 'governance.json'), 'utf8'));
+    assert.deepEqual({ provider: row.provider, model: row.model }, expectedRoute);
+  }
+});
+
+test('an unavailable review model is recorded once and can be retried once the session has a route', async t => {
+  const expectedRoute = { provider: 'session-provider', model: 'session-model' };
+  const f = await fixture(t, mixed, { settings: { provider: '', model: '' }, sessionRoute: null, expectedRoute });
   const { run } = await f.mount();
   assert.deepEqual(await run(f.agent, 'manual'), { status: 'review_model_unavailable' });
   assert.deepEqual(await run(f.agent, 'automatic'), { status: 'review_model_unavailable' });
@@ -171,6 +191,8 @@ test('an unavailable review model is recorded and the same evidence remains retr
   const persisted = JSON.parse(await readFile(path, 'utf8'));
   assert.equal(persisted.runs.length, 1);
   assert.equal(persisted.runs[0]?.status, 'review_model_unavailable');
+  f.agent.model.current = () => expectedRoute;
+  assert.deepEqual(await run(f.agent, 'manual'), { status: 'no_change' });
 });
 
 test('a review interrupted by a settings change remains retryable after remount', async t => {
@@ -180,6 +202,7 @@ test('a review interrupted by a settings change remains retryable after remount'
   const path = join(f.directory, 'governance.json');
   const persisted = JSON.parse(await readFile(path, 'utf8'));
   persisted.runs[0].status = 'settings_changed';
+  persisted.durableRuns[0].status = 'settings_changed';
   await writeFile(path, JSON.stringify(persisted));
   const { run: retry } = await f.mount();
   assert.deepEqual(await retry(f.agent, 'manual'), { status: 'no_change' });

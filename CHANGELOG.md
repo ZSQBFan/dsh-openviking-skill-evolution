@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.8
+
+- Use the reviewed session's model unless both reviewer provider and model IDs are configured.
+- Clarify automatic review triggers and show each skill’s load count and last-use time.
+- Show OpenViking connection and active conversation linkage separately. Keep the correct conversation status after a plugin reload.
+- Add confirmed actions to clear the proposal list and run history. Saved skill versions remain accessible for rollback.
+
 ## 0.2.7
 
 - Make review timeout configurable with a 300-second default, expose the duration trigger, and require an explicit model route for model-backed reviews.

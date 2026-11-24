@@ -11,9 +11,10 @@ export async function apply(ctx) {
   const firstGeneration = process.env.SKILL_EVOLUTION_RELEASE_PREVIOUS === undefined;
   const writer = firstGeneration ? await startWriterFixture() : undefined;
   const approvals = [];
+  const memoryStates = new Map();
   if (writer) {
     ctx.effect(() => () => writer.close());
-    ctx.provide('openvikingMemory', { config: writer.config });
+    ctx.provide('openvikingMemory', { config: writer.config, states: memoryStates });
     const reviewerModel = { provider, id: model, name: 'Release reviewer fixture', context: { contextWindow: 65536 } };
     ctx.llm.registerAdapter([provider], {
       providerInfo: id => ({ id, name: 'Release fixture' }), providerRetryPolicy: () => undefined,
@@ -79,17 +80,26 @@ export async function apply(ctx) {
         const login = await fetch(ctx.connection.authenticatedUrl(origin), { redirect: 'manual' });
         const cookie = login.headers.get('set-cookie')?.split(';')[0];
         assert(cookie, 'fixture login established an owner session');
-        async function request(action, input) {
+        async function request(action, input, currentSession) {
           const init = action === undefined ? { headers: { Cookie: cookie } } : {
             method: 'POST', headers: { Cookie: cookie, Origin: origin, 'content-type': 'application/json' },
             body: JSON.stringify({ action, input }),
           };
-          const response = await fetch(`${origin}${dashboardPath}`, { ...init, signal: AbortSignal.timeout(15000) });
+          const url = new URL(dashboardPath, origin);
+          if (currentSession) url.searchParams.set('sessionId', currentSession);
+          const response = await fetch(url, { ...init, signal: AbortSignal.timeout(15000) });
           const result = await response.json();
           assert.equal(response.status, 200, JSON.stringify(result));
           assert.equal(result.ok, true);
           return result.data;
         }
+        memoryStates.set(sessionId, { dshSessionId: sessionId, ovSessionId: 'release-ov-session', config: writer.config, ready: true });
+        const currentMemory = (await request(undefined, undefined, sessionId)).memory;
+        assert.equal(currentMemory.connection, 'observed');
+        assert.equal(currentMemory.state, 'linked');
+        assert.equal(currentMemory.ovSessionId, 'release-ov-session');
+        assert.deepEqual((await request()).memory, { connection: 'observed', state: 'no_session' });
+        steps.push('memory status finds an open session after installation');
         assert.deepEqual(await request('run', { sessionId }), { status: 'no_evidence' });
         steps.push('dashboard can review a session created before bundle installation');
         const proposalId = await checkProposal(session, outcome, uri);
@@ -100,6 +110,7 @@ export async function apply(ctx) {
           async session(label, body, replacement) {
             const id = `release-review-${label}`;
             const { agent } = await ctx.agents.create({ sessionId: id, meta: { cwd: process.cwd() } });
+            if (label === 'shadow') agent.model.select({ provider, model });
             seedReview((type, data, sourceEventSeqs) => agent.session.append(type, data,
               type === 'tool/call' ? undefined : { surfaceOp: 'append', sourceEventSeqs }), body, replacement);
             await ctx.sessions.flush(agent.session);

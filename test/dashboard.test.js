@@ -6,14 +6,14 @@ import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { mountEvolution } from '../src/evolution.js';
 
-async function mountReview(t, { existing = [], mode = 'shadow', resolveAgent } = {}) {
+async function mountReview(t, { existing = [], mode = 'shadow', resolveAgent, openvikingMemory } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'skill-dashboard-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const sessions = new Map(existing.map(id => [id, { session: { id } }]));
   const agents = { get: id => sessions.get(id), list: () => [...sessions.values()] };
   let route;
   const ctx = {
-    get: name => ({ agents, sessionController: resolveAgent && { resolveAgent } })[name],
+    get: name => ({ agents, openvikingMemory, sessionController: resolveAgent && { resolveAgent } })[name],
     on() {}, effect(create) { t.after(create()); },
     inject(dependencies, mount) {
       if (dependencies.includes('connection')) {
@@ -23,7 +23,7 @@ async function mountReview(t, { existing = [], mode = 'shadow', resolveAgent } =
     sessionProjections: { async register() { return { stateOf: () => ({ events: [] }) }; } },
   };
   await mountEvolution(ctx, { directory, owner: 'fixture', settings: { mode } }, { stateOf: () => ({ evidence: [] }) });
-  return input => route.fetch(new Request(`http://localhost${route.path}`, input === undefined ? {} : {
+  return (input, query = '') => route.fetch(new Request(`http://localhost${route.path}${query}`, input === undefined ? {} : {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'run', input }),
   }));
 }
@@ -33,6 +33,28 @@ test('manual dashboard review finds an agent created before the plugin mounted',
   assert.equal((await (await request()).json()).data.capabilities.run, true);
   assert.deepEqual(await (await request({ sessionId: 'existing-session' })).json(), { ok: true, data: { status: 'no_evidence' } });
   assert.deepEqual(await (await request({})).json(), { ok: true, data: { status: 'no_session' } });
+});
+
+test('memory dashboard reads the requested live session, including agents open before plugin reload', async t => {
+  const request = await mountReview(t, {
+    existing: ['existing-session', 'another-session'],
+    resolveAgent: () => assert.fail('status checks must not resume a session'),
+    openvikingMemory: { config: { enabled: true }, states: new Map([['existing-session', {
+      dshSessionId: 'existing-session', ovSessionId: 'ov-existing', config: { enabled: true }, ready: true,
+    }]]) },
+  });
+  const status = async id => (await (await request(undefined, id && `?sessionId=${id}`)).json()).data.memory;
+  const linked = await status('existing-session');
+  assert.equal(linked.connection, 'observed');
+  assert.equal(linked.state, 'linked');
+  assert.equal(linked.ovSessionId, 'ov-existing');
+  const other = await status('another-session');
+  assert.equal(other.connection, 'observed');
+  assert.equal(other.state, 'unobserved');
+  assert.equal(other.ovSessionId, null);
+  const none = await status('');
+  assert.equal(none.connection, 'observed');
+  assert.equal(none.state, 'no_session');
 });
 
 test('manual dashboard review resolves a stored session with no live agent', async t => {

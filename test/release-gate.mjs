@@ -55,11 +55,11 @@ export async function* reviewer(messages, observed) {
 }
 
 export async function verifyPublicReview({ request, session, liveBody, observed }) {
-  const settings = async (mode, revision) => {
-    const result = await request('settings', { mode, revision, provider, model, reviewTimeoutMs: 5000, maxDurationMs: 90000 });
+  const settings = async (mode, revision, route = { provider, model }) => {
+    const result = await request('settings', { mode, revision, ...route, reviewTimeoutMs: 5000, maxDurationMs: 90000 });
     assert.deepEqual(result, { status: 'saved', revision: revision + 1 });
     const { settings } = await request();
-    for (const [field, value] of Object.entries({ mode, effectiveMode: mode, revision: revision + 1, provider, model, reviewTimeoutMs: 5000, maxDurationMs: 90000 })) {
+    for (const [field, value] of Object.entries({ mode, effectiveMode: mode, revision: revision + 1, ...route, reviewTimeoutMs: 5000, maxDurationMs: 90000 })) {
       assert.equal(settings[field], value, `dashboard settings: ${field}`);
     }
   };
@@ -95,7 +95,7 @@ export async function verifyPublicReview({ request, session, liveBody, observed 
   assert.equal(await liveBody(), reviewed, 'public approval must write the reviewed fixture body');
   assert.equal((await request()).proposals.find(item => item.id === approved)?.status, 'applied');
 
-  await settings('shadow', start.settings.revision + 1);
+  await settings('shadow', start.settings.revision + 1, { provider: '', model: '' });
   const shadow = await run('shadow', 'shadow', reviewed, 'Run smoke and check exit status before archiving the output.');
   assert.equal(await liveBody(), reviewed, 'shadow proposal must not write');
 
@@ -108,8 +108,21 @@ export async function verifyPublicReview({ request, session, liveBody, observed 
   assert.deepEqual(new Map(proposals.map(({ id, status }) => [id, status])), new Map([
     [approved, 'applied'], [shadow, 'shadow'], [pending, 'pending'],
   ]));
+  assert.deepEqual(await request('clearHistory', { confirm: false }), { status: 'invalid_confirm', count: 0 });
+  const historySize = (await request()).history.length;
+  assert(historySize >= 3);
+  assert.deepEqual(await request('clearHistory', { confirm: true }), { status: 'history_cleared', count: historySize });
+  const afterHistory = await request();
+  assert.deepEqual(afterHistory.history, []);
+  assert.deepEqual(afterHistory.proposals, proposals);
+  assert.deepEqual(await request('clearProposals', { confirm: true }), { status: 'proposals_cleared', count: proposals.length });
+  const afterProposals = await request();
+  assert.deepEqual(afterProposals.proposals, []);
+  assert(afterProposals.preservedVersions.some(item => item.id === approved && item.actions.includes('rollback')));
+  assert.equal((await request('approve', { id: pending })).status, 'proposal_cleared');
+  assert.equal(await liveBody(), reviewed, 'clearing does not alter the applied skill');
   return { path: dashboardPath, proposals: { applied: approved, shadow, pending }, approvals: observed,
-    bodySha256: { initial: sha256(baseline), final: sha256(reviewed) } };
+    bodySha256: { initial: sha256(baseline), final: sha256(reviewed) }, cleared: { history: historySize, proposals: proposals.length } };
 }
 
 export async function verifyPackedReview(packageDir, name, version) {
@@ -165,7 +178,8 @@ export async function verifyPackedReview(packageDir, name, version) {
           events.push(event);
           return event;
         }, input, replacement);
-        agents.set(id, { session: { id, events } });
+        const sessionRoute = label === 'shadow' ? { provider, model } : { provider: 'unused-session-provider', model: 'unused-session-model' };
+        agents.set(id, { session: { id, events }, model: { current: () => sessionRoute } });
         return id;
       },
       async request(action, input) {

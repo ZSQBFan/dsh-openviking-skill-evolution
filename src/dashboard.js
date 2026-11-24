@@ -2,7 +2,7 @@ export const DASHBOARD_PATH = '/api/dsh-openviking-skill-evolution/dashboard';
 
 const ACTIONS = new Set([
   'run', 'settings', 'preview', 'approve', 'reject', 'rollback',
-  'curator', 'adopt', 'archive', 'restore',
+  'curator', 'adopt', 'archive', 'restore', 'clearProposals', 'clearHistory',
 ]);
 
 function json(data, status = 200) {
@@ -27,7 +27,9 @@ export function mountDashboard(ctx, { snapshot, actions }) {
     async fetch(request) {
       try {
         if (request.method === 'GET') {
-          const data = await snapshot({ signal: request.signal });
+          const sessionId = new URL(request.url).searchParams.get('sessionId')?.trim();
+          if (sessionId?.length > 512) return failure('badRequest', 400);
+          const data = await snapshot({ signal: request.signal, sessionId: sessionId || undefined });
           const capabilities = Object.fromEntries([...operations.keys()].map(key => [key, data.capabilities?.[key] === true]));
           return json({ ok: true, data: { ...data, capabilities } });
         }

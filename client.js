@@ -22,11 +22,11 @@ window.__ModuleLoader__.load({
     const dictionaries = {
       en: {
         durationMinutes: 'Review trigger duration (minutes)', reviewTimeoutSeconds: 'Model review timeout (seconds)',
-        reviewProvider: 'Review provider ID', reviewModel: 'Review model ID', routeRequired: 'Enter both IDs to enable model-based reviews.',
+        reviewProvider: 'Review provider ID', reviewModel: 'Review model ID', usingSessionModel: 'Reviews use the source session’s model when either ID is blank.',
         older: 'Older entries', createdAt: 'Created', startedAt: 'Started', finishedAt: 'Finished', retryAt: 'Retry after', stage: 'Stage', errorCode: 'Error code',
         timed_out: 'Review timed out', review_source_busy: 'The source session is still running.',
         cooldown: 'The review is in cooldown.', retry_blocked: 'Retry blocked by the review retry policy.',
-        review_model_unavailable: 'The configured review provider or model is unavailable.',
+        review_model_unavailable: 'The review model is unavailable.',
         title: 'Skill evolution', subtitle: 'OpenViking · Review and lifecycle', refresh: 'Refresh', run: 'Run review',
         loading: 'Loading dashboard…', refreshing: 'Refreshing dashboard…', working: 'Working…', overview: 'Overview', history: 'Run history',
         proposals: 'Proposals', curatorTitle: 'Curator', settingsTitle: 'Settings', usage: 'Usage', memory: 'Memory',
@@ -57,19 +57,39 @@ window.__ModuleLoader__.load({
         inputTokens: 'Input tokens', outputTokens: 'Output tokens', cachedTokens: 'Cached tokens', totalTokens: 'Total tokens',
         runs: 'Runs', cost: 'Cost', durationMs: 'Duration (ms)', source: 'Source', reason: 'Reason',
         provider: 'Provider', model: 'Model', peer: 'Peer', available: 'Available', unavailableStatus: 'Unavailable',
-        maxTurns: 'Turn limit', maxToolCalls: 'Tool-call limit', maxFailures: 'Failure limit', cooldownMs: 'Cooldown (ms)',
+        maxTurns: 'Trigger after this many conversation turns', maxToolCalls: 'Trigger after this many tool calls',
+        maxFailures: 'Trigger after this many conversation errors', cooldownMs: 'Cooldown (ms)',
+        triggerHelp: 'These counts are for the source conversation since its last review. Reaching any threshold makes an automatic review eligible at the end of a turn.',
+        skillUsage: 'Skill usage', noSkillUsage: 'No skill loads recorded yet.', skillName: 'Skill', skillLoads: 'Loads', lastUsed: 'Last used',
+        memoryLink: 'OpenViking link', memoryRecall: 'Recall into this conversation', memoryCapture: 'Save conversation to memory',
+        memoryTools: 'Save tool results', memoryWriteState: 'Memory writes', memoryQueued: 'Waiting to sync', memoryNoneQueued: 'No writes pending',
+        memoryScope: 'Recall scope', memoryActor: 'Current agent', memoryAll: 'All accessible agents',
+        memoryOn: 'On', memoryOff: 'Off', memoryUnknown: 'Unknown', memoryLinked: 'Linked', memoryUnobserved: 'Session state not available yet',
+        memorySession: 'Current conversation', memoryNoSession: 'No conversation selected',
+        memoryConfigured: 'Configured', memoryObserved: 'Connection observed',
+        memoryInitializing: 'Connecting', memoryExcluded: 'Excluded from memory', memoryUnavailable: 'Memory plugin unavailable',
+        memoryExperiences: 'Experience activity', memoryInjected: 'Read into context', memoryRecalled: 'Found in recall',
+        technicalDetails: 'Technical details', dshSessionId: 'DSH session ID', ovSessionId: 'OpenViking session ID', peerId: 'Memory space',
+        lastInjectedSeq: 'Last recall event', lastProfileSeq: 'Last profile event', lastCommitBoundarySeq: 'Last save boundary',
+        remoteCommit: 'Remote save status', unverified: 'Unverified',
+        clearProposals: 'Clear proposals', clearHistory: 'Clear run history',
+        confirmClearProposals: 'Clear the proposal list? Applied skill versions remain available for rollback.',
+        confirmClearHistory: 'Clear the displayed run history?',
+        proposals_cleared: 'Proposals cleared.', history_cleared: 'Run history cleared.', invalid_confirm: 'Confirm this action to clear the records.',
+        proposal_cleared: 'This proposal was cleared.',
+        preservedVersions: 'Saved versions and recovery', no_change: 'No changes needed',
         correctionWords: 'Correction phrases (one per line)', curatorScope: 'Lifecycle actions apply to private skills managed by this plugin.',
-        metric: 'Metric', value: 'Value', advanced: 'Advanced settings', nextScan: 'Next check', connection: 'OpenViking connection', reuse: 'Uses the account configured in OpenViking Memory.', configuredWriter: 'Uses the configured OpenViking connection.', localDrafts: 'Drafts stay on this device. Connect OpenViking Memory to apply updates.', modelSelection: 'Use the exact provider and model IDs from DSH’s model settings. Leave both empty to pause model-based reviews.', modeHelp: 'Choose what happens when DSH learns an improvement to a skill.', cooldownMinutes: 'Minimum time between reviews (minutes)',
+        metric: 'Metric', value: 'Value', advanced: 'Advanced settings', nextScan: 'Next check', connection: 'OpenViking connection', reuse: 'Uses the account configured in OpenViking Memory.', configuredWriter: 'Uses the configured OpenViking connection.', localDrafts: 'Drafts stay on this device. Connect OpenViking Memory to apply updates.', modelSelection: 'To override the source session’s model, enter both IDs from DSH’s model settings.', modeHelp: 'Choose what happens when DSH learns an improvement to a skill.', cooldownMinutes: 'Minimum time between reviews (minutes)',
          effectiveMode: 'Current behavior', autoHelp: 'Apply improvements to your private skills automatically.',
          approvalHelp: 'Show each improvement for your approval before updating.', shadowHelp: 'Keep suggestions on this device for you to inspect.', offHelp: 'Pause skill reviews and learning.',
       },
       zh: {
         durationMinutes: '复盘触发时长（分钟）', reviewTimeoutSeconds: '模型复盘超时（秒）',
-        reviewProvider: '复盘提供商 ID', reviewModel: '复盘模型 ID', routeRequired: '填写提供商和模型两个 ID 后，才会运行模型复盘。',
+        reviewProvider: '复盘提供商 ID', reviewModel: '复盘模型 ID', usingSessionModel: '未完整设置复盘模型，当前使用来源会话的模型。',
         older: '较早的记录', createdAt: '创建时间', startedAt: '开始时间', finishedAt: '完成时间', retryAt: '最早重试时间', stage: '阶段', errorCode: '错误代码',
         timed_out: '复盘超时', review_source_busy: '来源会话仍在运行。',
         cooldown: '复盘仍在冷却期。', retry_blocked: '当前复盘记录受重试策略限制。',
-        review_model_unavailable: '配置的复盘提供商或模型不可用。',
+        review_model_unavailable: '复盘模型不可用。',
         title: '技能演进', subtitle: 'OpenViking · 复盘与生命周期', refresh: '刷新', run: '运行复盘',
         loading: '正在加载仪表板…', refreshing: '正在刷新仪表板…', working: '正在处理…', overview: '概览', history: '运行历史',
         proposals: '提案', curatorTitle: '技能治理', settingsTitle: '设置', usage: '用量', memory: '记忆',
@@ -99,9 +119,29 @@ window.__ModuleLoader__.load({
         inputTokens: '输入 token', outputTokens: '输出 token', cachedTokens: '缓存 token', totalTokens: '总 token',
         runs: '运行次数', cost: '费用', durationMs: '耗时（毫秒）', source: '来源', reason: '原因',
         provider: '提供商', model: '模型', peer: '项目记忆空间', available: '可用', unavailableStatus: '不可用',
-        maxTurns: '轮次上限', maxToolCalls: '工具调用上限', maxFailures: '失败次数上限', cooldownMs: '冷却时间（毫秒）',
+        maxTurns: '会话达到多少轮后触发复盘', maxToolCalls: '会话调用工具多少次后触发复盘',
+        maxFailures: '会话出现多少次错误后触发复盘', cooldownMs: '冷却时间（毫秒）',
+        triggerHelp: '统计上次复盘后来源会话的活动。任一项达到设定值，本轮结束后即可安排自动复盘。',
+        skillUsage: '技能使用情况', noSkillUsage: '还没有技能加载记录。', skillName: '技能', skillLoads: '加载次数', lastUsed: '最近使用',
+        memoryLink: 'OpenViking 连接', memoryRecall: '为此会话检索记忆', memoryCapture: '将会话写入记忆',
+        memoryTools: '记录工具结果', memoryWriteState: '写入队列', memoryQueued: '等待同步', memoryNoneQueued: '没有待写入项目',
+        memoryScope: '检索范围', memoryActor: '当前代理', memoryAll: '所有可访问的代理',
+        memoryOn: '已开启', memoryOff: '已关闭', memoryUnknown: '未知', memoryLinked: '已关联', memoryUnobserved: '暂未读取到会话状态',
+        memorySession: '当前会话', memoryNoSession: '未选中会话',
+        memoryConfigured: '已配置', memoryObserved: '已检测到连接',
+        memoryInitializing: '正在连接', memoryExcluded: '此会话已排除', memoryUnavailable: '记忆插件未连接',
+        memoryExperiences: '经验记忆活动', memoryInjected: '已读取到上下文', memoryRecalled: '已检索',
+        technicalDetails: '技术详情', dshSessionId: 'DSH 会话 ID', ovSessionId: 'OpenViking 会话 ID', peerId: '记忆空间',
+        lastInjectedSeq: '最近检索事件', lastProfileSeq: '最近用户资料事件', lastCommitBoundarySeq: '最近本地提交边界',
+        remoteCommit: '远端写入状态', unverified: '未核验',
+        clearProposals: '清空提案', clearHistory: '清空运行历史',
+        confirmClearProposals: '清空提案列表？已应用的技能版本仍可回滚。',
+        confirmClearHistory: '清空显示的运行历史？',
+        proposals_cleared: '已清空提案。', history_cleared: '已清空运行历史。', invalid_confirm: '请先确认清空操作。',
+        proposal_cleared: '此提案已清空。',
+        preservedVersions: '已保存版本与恢复', no_change: '无需修改',
         correctionWords: '纠正短语（每行一个）', curatorScope: '生命周期操作仅适用于此插件纳管的私有技能。',
-        metric: '指标', value: '数值', advanced: '高级设置', nextScan: '下次检查', connection: 'OpenViking 连接', reuse: '沿用 OpenViking 记忆插件中已配置的账号。', configuredWriter: '使用已配置的 OpenViking 连接。', localDrafts: '改进会保存在本机。连接 OpenViking 记忆插件后，可将改进写回技能库。', modelSelection: '请填写 DSH 模型设置中的确切提供商 ID 和模型 ID。两项均留空可暂停模型复盘。', modeHelp: '选择 DSH 学到值得保留的经验后，如何更新技能。', cooldownMinutes: '自动复盘最短间隔（分钟）',
+        metric: '指标', value: '数值', advanced: '高级设置', nextScan: '下次检查', connection: 'OpenViking 连接', reuse: '沿用 OpenViking 记忆插件中已配置的账号。', configuredWriter: '使用已配置的 OpenViking 连接。', localDrafts: '改进会保存在本机。连接 OpenViking 记忆插件后，可将改进写回技能库。', modelSelection: '如需指定复盘模型，请填写 DSH 模型设置中的提供商 ID 和模型 ID。任一项留空时，复盘沿用来源会话的模型。', modeHelp: '选择 DSH 学到值得保留的经验后，如何更新技能。', cooldownMinutes: '自动复盘最短间隔（分钟）',
          effectiveMode: '当前实际行为', autoHelp: '符合条件的改进会自动写入你的私有技能，并保留可恢复的版本。',
          approvalHelp: '先向你展示改进，确认后才更新技能。', shadowHelp: '把改进保存在本机，供你查看。', offHelp: '暂停技能复盘和学习。',
       },
@@ -111,11 +151,13 @@ window.__ModuleLoader__.load({
     const confirmCopy = {
       approve: 'confirmApprove', reject: 'confirmReject', rollback: 'confirmRollback',
       archive: 'confirmArchive', restore: 'confirmRestore',
+      clearProposals: 'confirmClearProposals', clearHistory: 'confirmClearHistory',
     };
 
-    async function requestDashboard(signal, operation) {
+    async function requestDashboard(signal, operation, sessionId) {
       const send = window.__DSH_TRANSPORT__?.fetch ?? window.fetch.bind(window);
-      const response = await send(endpoint, {
+      const path = !operation && sessionId ? `${endpoint}?sessionId=${encodeURIComponent(sessionId)}` : endpoint;
+      const response = await send(path, {
         signal, credentials: 'same-origin', cache: 'no-store',
         ...(operation ? {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(operation),
@@ -139,8 +181,9 @@ window.__ModuleLoader__.load({
       return h('button', { type: 'button', className: primary ? 'ove-button ove-primary' : 'ove-button', ...props }, children);
     }
 
-    function Card({ title, children }) {
-      return h('section', { className: 'ove-card' }, h('h2', null, title), children);
+    function Card({ title, controls, children }) {
+      return h('section', { className: 'ove-card' },
+        controls ? h('div', { className: 'ove-row' }, h('h2', null, title), controls) : h('h2', null, title), children);
     }
 
     function localDate(value) {
@@ -178,13 +221,60 @@ window.__ModuleLoader__.load({
         h('dt', null, known(t, key)), h('dd', null, h(Value, { value: displayValue(key, value), t })))));
     }
 
+    function shortSkillName(uri) {
+      return uri.split('/').filter(Boolean).at(-2) ?? uri;
+    }
+
     function Usage({ data, t }) {
-      const entries = Object.entries(data ?? {}).filter(([, value]) => value !== null && value !== undefined);
-      if (!entries.length) return h('p', { className: 'ove-muted' }, t('empty'));
-      return h('table', { className: 'ove-usage' },
-        h('thead', null, h('tr', null, h('th', { scope: 'col' }, t('metric')), h('th', { scope: 'col' }, t('value')))),
-        h('tbody', null, entries.map(([key, value]) => h('tr', { key },
-          h('th', { scope: 'row' }, known(t, key)), h('td', null, h(Value, { value: displayValue(key, value), t }))))));
+      const skills = rows(data?.skills).filter(item => typeof item?.uri === 'string')
+        .sort((a, b) => (Date.parse(b.lastUsed) || Number(b.lastUsed) || 0) - (Date.parse(a.lastUsed) || Number(a.lastUsed) || 0));
+      return skills.length ? h(LatestList, { kind: 'usage', items: skills, t, renderItem: item =>
+        h('li', { key: item.uri, className: 'ove-row' },
+          h('div', null, h('strong', { title: item.uri }, shortSkillName(item.uri)),
+            item.lastUsed != null && h('p', { className: 'ove-muted' }, `${t('lastUsed')} · ${localDate(item.lastUsed)}`)),
+          h('span', null, `${t('skillLoads')} · ${(item.loads ?? 0).toLocaleString()}`)),
+      }) : h('p', { className: 'ove-muted' }, t('noSkillUsage'));
+    }
+
+    const memoryStates = {
+      linked: 'memoryLinked', unobserved: 'memoryUnobserved', initializing: 'memoryInitializing',
+      excluded: 'memoryExcluded', unavailable: 'memoryUnavailable', no_session: 'memoryNoSession',
+    };
+    const memoryConnections = {
+      observed: 'memoryObserved', configured: 'memoryConfigured', disabled: 'memoryOff', unavailable: 'memoryUnavailable',
+    };
+
+    function Memory({ data, t }) {
+      const { connection, state, recall, capture, experiences } = data ?? {};
+      const enabled = value => value === true ? 'memoryOn' : value === false ? 'memoryOff' : 'memoryUnknown';
+      const summaries = [
+        [t('memoryLink'), t(memoryConnections[connection] ?? 'memoryUnknown')],
+        [t('memorySession'), t(memoryStates[state] ?? 'memoryUnknown')],
+      ];
+      if (recall?.enabled != null) {
+        summaries.push([t('memoryRecall'), t(enabled(recall.enabled))]);
+        if (recall.enabled && recall.scope) summaries.push([t('memoryScope'), t(recall.scope === 'actor' ? 'memoryActor' : 'memoryAll')]);
+      }
+      if (capture?.enabled != null) {
+        summaries.push([t('memoryCapture'), t(enabled(capture.enabled))]);
+        if (capture.enabled && capture.toolResultsEnabled != null) summaries.push([t('memoryTools'), t(enabled(capture.toolResultsEnabled))]);
+        if (capture.hasPendingWrites != null) summaries.push([t('memoryWriteState'), t(capture.hasPendingWrites ? 'memoryQueued' : 'memoryNoneQueued')]);
+      }
+      const technical = {
+        dshSessionId: data?.dshSessionId, ovSessionId: data?.ovSessionId, peerId: data?.peerId,
+        lastInjectedSeq: recall?.lastInjectedSeq, lastProfileSeq: recall?.lastProfileSeq,
+        lastCommitBoundarySeq: capture?.lastCommitBoundarySeq, remoteCommit: state === 'linked' ? capture?.remoteCommit : null,
+      };
+      const activity = rows(experiences).filter(item => typeof item?.uri === 'string').slice().reverse();
+      return h(React.Fragment, null,
+        h('dl', { className: 'ove-facts ove-memory-summary' }, summaries.map(([label, value]) =>
+          h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value)))),
+        activity.length > 0 && h('details', { className: 'ove-more' },
+          h('summary', { onKeyDown: activateOnEnter }, `${t('memoryExperiences')} (${activity.length})`),
+          h('ul', { className: 'ove-list' }, activity.map((item, i) => h('li', { key: `${i}:${item.uri}` },
+            h('span', { title: item.uri }, item.uri.split('/').at(-1)), ' · ', t(item.kind === 'injection' ? 'memoryInjected' : 'memoryRecalled'))))),
+        Object.values(technical).some(value => value != null) && h('details', { className: 'ove-more' },
+          h('summary', { onKeyDown: activateOnEnter }, t('technicalDetails')), h(Facts, { data: technical, t })));
     }
 
     function Diff({ preview, t }) {
@@ -216,6 +306,8 @@ window.__ModuleLoader__.load({
 
     function Dashboard({ t, useSessions = noCurrentSession }) {
       const currentSessionId = useSessions(selectCurrentSession);
+      const currentSession = useRef(currentSessionId);
+      currentSession.current = currentSessionId;
       const [data, setData] = useState(null);
       const [error, setError] = useState('');
       const [notice, setNotice] = useState(null);
@@ -236,7 +328,7 @@ window.__ModuleLoader__.load({
         reading.current = read;
         if (manual) setRefreshing(true);
         try {
-          const next = await requestDashboard(signal);
+          const next = await requestDashboard(signal, undefined, currentSession.current);
           if (!signal.aborted && reading.current === read) {
             setData(next);
             setError('');
@@ -262,12 +354,13 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         const controller = new AbortController();
         connection.current = controller;
-        void refresh(controller.signal);
         const timer = setInterval(() => {
           if (!pending.current && document.visibilityState !== 'hidden') void refresh(controller.signal);
         }, 15_000);
         return () => { clearInterval(timer); controller.abort(); };
       }, []);
+
+      useEffect(() => { void refresh(connection.current?.signal, true); }, [currentSessionId]);
 
       async function run(action, input) {
         const signal = connection.current?.signal;
@@ -282,6 +375,7 @@ window.__ModuleLoader__.load({
           if (action === 'preview') setPreview({ id: input.id, value: reply });
           else {
             if (action === 'settings') setDraft(null);
+            if (reply?.status === 'proposals_cleared') setPreview(null);
             setNotice({ result: reply, action });
             await refresh(signal, true);
           }
@@ -344,6 +438,28 @@ window.__ModuleLoader__.load({
         return h('p', { className: 'ove-muted' }, t(item.status === 'applied' ? 'indexUnconfirmed' : 'removalIndexUnconfirmed'));
       }
 
+      function confirmAction(action) {
+        if (!confirmation || (action ? confirmation.action !== action : confirmation.action.startsWith('clear'))) return null;
+        const { action: name, input } = confirmation;
+        return h('section', { className: 'ove-message ove-controls', role: 'group', 'aria-label': t(confirmCopy[name]) },
+          h('span', null, t(confirmCopy[name]), input.id || input.uri ? ` ${input.id ?? input.uri}` : ''),
+          h(Button, { onClick: () => setConfirmation(null) }, t('cancel')),
+          h(Button, { primary: true, disabled: !!busy || !enabled(name), onClick: () => void run(name, input) }, t('confirm')));
+      }
+      const preservedVersions = rows(data?.preservedVersions);
+      const proposalRow = item => h('li', { key: item.id },
+        h('div', { className: 'ove-row' }, h('div', null,
+          h('strong', null, item.title ?? item.uri ?? item.id), ' ', h('span', { className: 'ove-status' }, h(Value, { value: item.status, t })),
+          item.createdAt != null && h('p', { className: 'ove-muted' }, localDate(item.createdAt)),
+          item.summary && h('p', { className: 'ove-muted' }, item.summary), indexWarning(item)),
+        h('div', { className: 'ove-controls' }, proposalActions.filter(action => enabled(action) && (!Array.isArray(item.actions) || item.actions.includes(action))).map(action => actionButton(action, { id: item.id })))),
+        preview?.id === item.id && h('div', { className: 'ove-preview' },
+          h('div', { className: 'ove-row' }, h('h3', null, t('preview')), h(Button, { onClick: () => setPreview(null) }, t('close'))),
+          h(Diff, { preview: preview.value, t })));
+      const clearButton = (name, list) => list.length > 0 && enabled(name) && actionButton(name, { confirm: true });
+      const clearNotice = action => notice?.action === action && notice.result?.status &&
+        h('p', { role: 'status', className: 'ove-muted' }, known(t, notice.result.status));
+
       return h('div', { className: 'ove-dashboard' },
         h('style', null, css),
         h('header', { className: 'ove-header' },
@@ -355,17 +471,14 @@ window.__ModuleLoader__.load({
         !data && !error && h('p', { role: 'status' }, t('loading')),
         busy && h('p', { role: 'status', className: 'ove-message' }, t('working')),
         notice?.error && h('p', { role: 'alert', className: 'ove-message' }, t(notice.error)),
-        notice && !notice.error && h('div', { className: 'ove-message', role: 'status' },
+        notice && !notice.error && !notice.action?.startsWith('clear') && h('div', { className: 'ove-message', role: 'status' },
           h('strong', null, t('result')),
           notice.action === 'run' && notice.result?.status
             ? h(React.Fragment, null, ` · ${known(t, notice.result.status)}`,
               Object.keys(notice.result).some(key => key !== 'status') &&
                 h(Facts, { data: Object.fromEntries(Object.entries(notice.result).filter(([key]) => key !== 'status')), t }))
             : notice.result === null ? ` · ${t('actionComplete')}` : h(Value, { value: notice.result, t })),
-        confirmation && h('section', { className: 'ove-message ove-controls', role: 'group', 'aria-label': t(confirmCopy[confirmation.action]) },
-          h('span', null, t(confirmCopy[confirmation.action]), ' ', confirmation.input.id ?? confirmation.input.uri),
-          h(Button, { onClick: () => setConfirmation(null) }, t('cancel')),
-          h(Button, { primary: true, disabled: !!busy || !enabled(confirmation.action), onClick: () => void run(confirmation.action, confirmation.input) }, t('confirm'))),
+        confirmAction(),
         data && h(React.Fragment, null,
           h(Card, { title: t('settingsTitle') },
             settings.writeConnection && h('p', null, h('strong', null, t('connection')), ' · ',
@@ -379,6 +492,7 @@ window.__ModuleLoader__.load({
             }, modes.map(option => h('option', { key: option.id, value: option.id }, known(t, option.id))))),
             h('details', { className: 'ove-advanced' }, h('summary', { onKeyDown: activateOnEnter }, t('advanced')),
                h('p', { className: 'ove-muted' }, t('modelSelection')),
+               h('p', { className: 'ove-muted' }, t('triggerHelp')),
                h('div', { className: 'ove-settings ove-settings-grid' }, [...Object.keys(numericFields), ...textFields].map(key => {
                  const numeric = numericFields[key];
                  const isPhrases = key === 'correctionWords';
@@ -403,22 +517,21 @@ window.__ModuleLoader__.load({
                 onClick: () => void run('run', { sessionId: reviewSessionId }) }, t('run'))),
             reviewHint && h('p', { className: 'ove-muted' }, t(reviewHint)),
             settings.mode !== 'off' && (!settings.provider?.trim() || !settings.model?.trim()) &&
-              h('p', { className: 'ove-muted' }, t('routeRequired')),
+              h('p', { className: 'ove-muted' }, t('usingSessionModel')),
             h(Facts, { t, data: Object.fromEntries(Object.entries(status).filter(([key]) => key !== 'state' && key !== 'status')) })),
-          h(Card, { title: t('proposals') }, proposals.length ? h(LatestList, { kind: 'proposals', items: proposals, t, renderItem: item => h('li', { key: item.id },
-            h('div', { className: 'ove-row' }, h('div', null,
-              h('strong', null, item.title ?? item.uri ?? item.id), ' ', h('span', { className: 'ove-status' }, h(Value, { value: item.status, t })),
-              item.createdAt != null && h('p', { className: 'ove-muted' }, localDate(item.createdAt)),
-              item.summary && h('p', { className: 'ove-muted' }, item.summary), indexWarning(item)),
-            h('div', { className: 'ove-controls' }, proposalActions.filter(action => enabled(action) && (!Array.isArray(item.actions) || item.actions.includes(action))).map(action => actionButton(action, { id: item.id })))),
-            preview?.id === item.id && h('div', { className: 'ove-preview' },
-              h('div', { className: 'ove-row' }, h('h3', null, t('preview')), h(Button, { onClick: () => setPreview(null) }, t('close'))),
-              h(Diff, { preview: preview.value, t })),
-          ) }) : h('p', { className: 'ove-muted' }, t('noProposals'))),
-          h(Card, { title: t('history') }, history.length ? h(LatestList, { kind: 'history', items: history, t, renderItem: (item, i) => h('li', { key: item.traceId ?? (item.id ?? '') + ':' + i },
-            h('details', null, h('summary', null, localDate(item.at ?? item.startedAt) ?? item.id ?? '', ' ',
-              h(Value, { value: item.status ?? item.state, t })), h(Facts, { data: item, t })),
-          ) }) : h('p', { className: 'ove-muted' }, t('noHistory'))),
+          h(Card, { title: t('proposals'), controls: clearButton('clearProposals', proposals) },
+            confirmAction('clearProposals'), clearNotice('clearProposals'),
+            proposals.length ? h(LatestList, { kind: 'proposals', items: proposals, renderItem: proposalRow, t })
+              : h('p', { className: 'ove-muted' }, t('noProposals')),
+            preservedVersions.length > 0 && h('details', { className: 'ove-more' },
+              h('summary', { onKeyDown: activateOnEnter }, `${t('preservedVersions')} (${preservedVersions.length})`),
+              h(LatestList, { kind: 'versions', items: preservedVersions, renderItem: proposalRow, t }))),
+          h(Card, { title: t('history'), controls: clearButton('clearHistory', history) },
+            confirmAction('clearHistory'), clearNotice('clearHistory'),
+            history.length ? h(LatestList, { kind: 'history', items: history, t, renderItem: (item, i) => h('li', { key: item.traceId ?? (item.id ?? '') + ':' + i },
+              h('details', null, h('summary', null, localDate(item.at ?? item.startedAt) ?? item.id ?? '', ' ',
+                h(Value, { value: item.status ?? item.state, t })), h(Facts, { data: item, t })),
+            ) }) : h('p', { className: 'ove-muted' }, t('noHistory'))),
           h(Card, { title: t('curatorTitle') },
             h('p', { className: 'ove-muted' }, t('curatorScope')),
             h('div', { className: 'ove-controls' }, enabled('curator') && actionButton('curator', {}), enabled('adopt') && h('form', {
@@ -433,8 +546,8 @@ window.__ModuleLoader__.load({
                 (action === (item.status === 'archived' ? 'restore' : 'archive')))).map(action => actionButton(action, { uri: item.uri }))),
             ))) : h('p', { className: 'ove-muted' }, t('noSkills'))),
           h('div', { className: 'ove-pair' },
-            h(Card, { title: t('usage') }, h(Usage, { data: data.usage, t })),
-            h(Card, { title: t('memory') }, h(Facts, { data: data.memory, t }))),
+            h(Card, { title: t('skillUsage') }, h(Usage, { data: data.usage, t })),
+            h(Card, { title: t('memory') }, h(Memory, { data: data.memory, t }))),
         ),
       );
     }
@@ -447,7 +560,7 @@ window.__ModuleLoader__.load({
       .ove-dashboard h3 { font-size:13px; }
       .ove-header,.ove-row { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; }
       .ove-controls { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
-      .ove-card,.ove-message { min-width:0; display:grid; gap:10px; border:1px solid var(--dsw-alias-settings-card-stroke,var(--dsw-alias-border-l4)); padding:14px; border-radius:12px; background:var(--dsw-alias-settings-card-fill,var(--dsw-alias-bg-layer-2)); }
+      .ove-card,.ove-message { min-width:0; display:grid; align-content:start; gap:10px; border:1px solid var(--dsw-alias-settings-card-stroke,var(--dsw-alias-border-l4)); padding:14px; border-radius:12px; background:var(--dsw-alias-settings-card-fill,var(--dsw-alias-bg-layer-2)); }
       .ove-message.ove-controls { display:flex; }
       .ove-card label { display:inline-flex; align-items:center; flex-wrap:wrap; gap:7px; }
       .ove-muted,.ove-facts dt { color:var(--dsw-alias-text-secondary,currentColor); }
@@ -462,8 +575,7 @@ window.__ModuleLoader__.load({
       .ove-advanced > p { margin-top:8px; }
       .ove-settings textarea { resize:vertical; }
       .ove-settings > .ove-controls { grid-column:1 / -1; }
-      .ove-usage { width:100%; border-collapse:collapse; text-align:left; }
-      .ove-usage :is(th,td) { border-bottom:1px solid var(--dsw-alias-settings-card-stroke,var(--dsw-alias-border-l4)); padding:5px 0; vertical-align:top; }
+      .ove-memory-summary { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
       .ove-dashboard input { max-width:100%; }
       .ove-dashboard button:enabled,.ove-dashboard summary { cursor:pointer; }
       .ove-dashboard button:disabled { opacity:.48; }

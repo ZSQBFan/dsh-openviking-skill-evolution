@@ -8,7 +8,7 @@ import { applicableAttempt, consumesReviewEvidence, isFailureOutcome, retryRevie
 import { mountDashboard } from './dashboard.js';
 import { isSkillUri } from './evidence.js';
 import { createGovernance } from './governance.js';
-import { memoryLinkProjection, memoryLinkStatus } from './memory-link.js';
+import { memoryConnectionStatus, memoryLinkProjection, memoryLinkStatus } from './memory-link.js';
 import { applyCreateDiff, applySkillDiff, buildCreateDiff, buildReplacementDiff, listReviewCandidates, review } from './review.js';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -142,7 +142,7 @@ export async function mountEvolution(ctx, options, evidence) {
     if (consumesReviewEvidence(item)) seen.set(item.sessionId, item);
     if (isFailureOutcome(item) || consumesReviewEvidence(item) || item.status === 'review_model_unavailable') attempts.set(item.sessionId, item);
   };
-  for (const item of governance.history().reverse()) rememberRun(item);
+  for (const item of governance.durableHistory().reverse()) rememberRun(item);
 
   const background = operation => {
     if (scope.signal.aborted) return;
@@ -204,7 +204,9 @@ export async function mountEvolution(ctx, options, evidence) {
       let proposal = drafts.length === 1 ? review(snapshot, sessionId, drafts[0].uri) : null;
       if (!proposal?.proposalId || (previous && proposal.evidence.userSeq <= previous.seq)) proposal = null;
       if (!proposal && policy?.committedEvidence?.length) {
-        ({ provider, model } = config);
+        const override = { provider: config.provider.trim(), model: config.model.trim() };
+        const route = override.provider && override.model ? override : agent.model?.current?.();
+        ({ provider, model } = route ?? {});
         const llm = ctx.get('llm');
         if (!provider || !model || !llm) {
           const unavailable = { status: 'review_model_unavailable' };
@@ -380,6 +382,8 @@ export async function mountEvolution(ctx, options, evidence) {
     adopt: async input => (await getCurator()).adopt(input.uri),
     archive: async input => (await getCurator()).archive(input.uri),
     restore: async input => (await getCurator()).restore(input.uri),
+    clearProposals: input => governance.clearProposals(input),
+    clearHistory: input => governance.clearHistory(input),
   };
   for (const action of ['approve', 'reject', 'rollback']) actions[action] = async (input, { signal }) => {
     const result = await governance.vote(action, input.id, signal);
@@ -387,19 +391,24 @@ export async function mountEvolution(ctx, options, evidence) {
     return result;
   };
   ctx.inject(['connection'], connectionCtx => {
-    mountDashboard(connectionCtx, { actions, snapshot: async () => {
+    mountDashboard(connectionCtx, { actions, snapshot: async ({ sessionId } = {}) => {
       const settings = governance.settings();
       const skillState = (await getCurator()).snapshot();
       const canManage = Boolean(options.owner ?? resolveConnection?.()?.owner);
-      const session = agentById.get(selected)?.session;
+      const runtime = ctx.get('openvikingMemory');
+      const agent = sessionId && (ctx.get('agents')?.get(sessionId) ?? agentById.get(sessionId));
+      const session = agent?.session;
       const history = governance.history();
       return { status: { state: running ? 'running' : settings.mode === 'off' ? 'disabled' : 'idle', mode: settings.mode,
         sessionId: running?.sessionId ?? selected, lastRun: history[0]?.at }, settings, history,
-      proposals: await governance.proposals(), ...skillState,
-      memory: session ? memoryLinkStatus(session, memory.stateOf(session), ctx.get('openvikingMemory')) : { state: 'unobserved' },
+      proposals: await governance.proposals(), preservedVersions: await governance.preservedVersions(), ...skillState,
+      memory: {
+         connection: memoryConnectionStatus(runtime),
+         ...(session ? memoryLinkStatus(session, memory.stateOf(session), runtime) : { state: sessionId ? 'unobserved' : 'no_session' }),
+       },
       capabilities: { run: settings.mode !== 'off' && Boolean(ctx.get('sessionController')?.resolveAgent || ctx.get('agents') || agentById.size), settings: true, preview: true,
         approve: governance.canWrite, reject: governance.canWrite, rollback: governance.canWrite, curator: true,
-        adopt: canManage, archive: canManage, restore: canManage } };
+        adopt: canManage, archive: canManage, restore: canManage, clearProposals: true, clearHistory: true } };
     } });
   });
   return { run, submit: (proposal, signal) => governance.submit(proposal, { signal }) };
