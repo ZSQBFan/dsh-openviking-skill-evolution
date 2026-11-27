@@ -8,9 +8,19 @@ const active = new AbortController().signal;
 test('review attribution maps OpenViking and snapshot errors without returning exception text', () => {
   assert.equal(reviewStreamErrorCode(Error('Incomplete skill snapshot'), active), 'skill_snapshot_incomplete');
   assert.equal(reviewStreamErrorCode(Error('Invalid skill file manifest'), active), 'ov_skill_file_manifest_invalid');
-  assert.equal(reviewStreamErrorCode(Error('OpenViking request failed (503)'), active), 'ov_http_server_error');
+  assert.equal(reviewStreamErrorCode(Error('OpenViking request failed (500)'), active), 'ov_http_server_error');
   assert.equal(reviewStreamErrorCode(Error('OpenViking request failed (429)'), active), 'ov_http_rate_limited');
   assert.equal(reviewStreamErrorCode(Error('OpenViking request failed (401)'), active), 'ov_http_authentication_failed');
+  const statuses = {
+    400: 'bad_request', 403: 'forbidden', 404: 'not_found', 405: 'method_not_allowed',
+    408: 'request_timeout', 409: 'conflict', 410: 'gone', 413: 'payload_too_large',
+    415: 'unsupported_media_type', 422: 'unprocessable_entity', 502: 'bad_gateway',
+    503: 'service_unavailable', 504: 'gateway_timeout',
+  };
+  for (const [status, name] of Object.entries(statuses)) {
+    assert.equal(reviewStreamErrorCode(Error(`OpenViking request failed (${status})`), active), `ov_http_${name}`);
+  }
+  assert.equal(reviewStreamErrorCode(Error('OpenViking request failed (418)'), active), 'ov_request_failed');
   assert.equal(reviewStreamErrorCode(Error('OpenViking request failed (private payload)'), active), 'unexpected_error');
   assert.equal(reviewStreamErrorCode(Error('private payload'), active), 'unexpected_error');
   assert.equal(reviewStreamErrorCode(new DOMException('private payload', 'TimeoutError'), active), 'TimeoutError');

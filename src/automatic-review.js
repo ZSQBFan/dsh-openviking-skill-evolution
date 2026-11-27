@@ -6,7 +6,7 @@ export const REVIEW_DEFAULTS = Object.freeze({
   maxToolCalls: 10,
   maxDurationMs: 30 * 60 * 1000,
   reviewTimeoutMs: 300_000,
-  cooldownMs: 30 * 60 * 1000,
+  cooldownMs: 15 * 60 * 1000,
   maxFailures: 3,
 });
 

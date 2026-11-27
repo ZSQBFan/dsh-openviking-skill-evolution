@@ -79,7 +79,11 @@ export async function apply(ctx) {
   const state = {
     status: { state: 'idle', lastRun: ${JSON.stringify(fixtureTime)} }, settings: { mode: 'auto', modes: ['auto', 'shadow', 'off'], revision: 1, effectiveMode: 'shadow', writeConnection: 'unavailable', maxDurationMs: 1800000, reviewTimeoutMs: 300000, provider: '', model: '' },
     history: [], proposals: [{ id: 'fixture-proposal', uri, status: 'pending', summary: 'Tighten instructions', createdAt: ${JSON.stringify(fixtureTime)}, actions: ['preview', 'approve'] },
-      ...['fixture-p2', 'fixture-p3', 'fixture-p4', 'fixture-p5'].map(id => ({ id, title: id, status: 'shadow' }))],
+      { id: 'fixture-p2', status: 'shadow', draftReason: 'draft_mode', actions: ['preview', 'applyDraft'] },
+      { id: 'fixture-p3', status: 'shadow', draftReason: 'draft_target_not_owned', applyBlockedReason: 'draft_reviews_disabled', actions: ['preview'] },
+      { id: 'fixture-p4', status: 'shadow', draftReason: 'draft_legacy', actions: ['preview'] },
+      { id: 'fixture-p5', status: 'shadow' },
+      { id: 'fixture-old-write', status: 'applying', actions: ['preview', 'approve'], history: [{ status: 'write_unconfirmed' }] }],
     preservedVersions: [],
     usage: { skills: [{ uri, loads: 2, lastUsed: Date.parse(${JSON.stringify(fixtureTime)}) }] },
     curator: { skills: [], nextScan: Date.parse(${JSON.stringify(fixtureTime)}), audit: [{ at: Date.parse(${JSON.stringify(fixtureTime)}), status: 'ready' }] },
@@ -88,8 +92,21 @@ export async function apply(ctx) {
       capture: { enabled: true, toolResultsEnabled: false, hasPendingWrites: false, remoteCommit: 'unverified' } },
   };
   const result = status => ({ status });
+  let draftAttempts = 0;
+  let approvalAttempts = 0;
   const actions = {
     run: ({ sessionId }) => {
+      if (sessionId === 'fixture-batch') {
+        state.proposals = [
+          { id: 'batch-applied', status: 'pending', actions: ['preview', 'approve'] },
+          { id: 'batch-conflict', status: 'shadow', actions: ['preview', 'applyDraft'] },
+          { id: 'batch-blocked', status: 'shadow', applyBlockedReason: 'archived', actions: ['preview'] },
+          { id: 'batch-error', status: 'pending', actions: ['preview', 'approve'] },
+          { id: 'batch-old-draft', status: 'shadow', actions: ['preview', 'applyDraft'] },
+          { id: 'batch-needs-check', status: 'pending', actions: ['preview', 'approve'] },
+          { id: 'batch-old-write', status: 'applying', actions: ['preview', 'approve'] },
+        ];
+      }
       const run = sessionId === 'fixture-timeout'
         ? { id: sessionId, at: ${JSON.stringify(fixtureTime)}, status: 'timed_out', stage: 'stream', errorCode: 'TimeoutError', reason: 'timeout fixture', retryAt: ${JSON.stringify(fixtureTime)} }
         : { id: sessionId, status: 'ready' };
@@ -102,9 +119,35 @@ export async function apply(ctx) {
       return result('applied');
     },
     preview: () => ({diff: '-old line\\n+new line'}),
-    approve: () => {
+    approve: ({ id }) => {
+      if (id?.startsWith('batch-')) {
+        const proposal = state.proposals.find(item => item.id === id && item.status === 'pending');
+        if (!proposal || id === 'batch-error') throw Error('fixture operation failed');
+        if (id === 'batch-needs-check') {
+          Object.assign(proposal, { status: 'applying', history: [{ status: 'write_unconfirmed' }] });
+          return result('write_unconfirmed');
+        }
+        Object.assign(proposal, { status: 'applied', actions: ['preview', 'rollback'] });
+        return result('applied');
+      }
+      if (approvalAttempts++ === 0) {
+        Object.assign(state.proposals[0], { status: 'applying',
+          history: [{ status: 'applying' }, { status: 'write_unconfirmed' }] });
+        return result('write_unconfirmed');
+      }
       Object.assign(state.proposals[0], { status: 'applied', actions: ['preview', 'rollback'],
         history: [{ status: 'index_unconfirmed' }, { status: 'applied' }] });
+      return result('applied');
+    },
+    applyDraft: input => {
+      if (input.id === 'batch-conflict') return result('conflict');
+      if (input.id === 'batch-old-draft') {
+        Object.assign(state.proposals.find(item => item.id === input.id), { status: 'applied', actions: ['preview', 'rollback'] });
+        return result('applied');
+      }
+      if (Object.keys(input).length !== 1 || input.id !== 'fixture-p2') throw Error('invalid draft application request');
+      if (draftAttempts++ === 0) return { status: 'conflict', error: 'fixture-private-diagnostic' };
+      Object.assign(state.proposals[1], { status: 'applied', actions: ['preview'] });
       return result('applied');
     },
     rollback: () => {
@@ -305,12 +348,40 @@ try {
   await text('fixture-newest');
   assert.deepEqual((await getHistory()).map(item => item.id), ['fixture-newest', 'fixture-current']);
   const latestRows = kind => `${panel}.querySelector('[data-ove-list="${kind}"]')`;
+  const proposalRow = id => `[...${latestRows('proposals')}.querySelectorAll('li')].find(row => row.querySelector('strong')?.textContent === ${JSON.stringify(id)})`;
+  const processed = `${latestRows('proposals')}.querySelector('details[data-ove-processed]')`;
+  assert.match(await evaluate(`${processed}.querySelector('summary').innerText`), /待核验 \(1\)/);
+  assert.equal(await evaluate(`${processed}.open`), false);
+  assert.equal(await evaluate(`${proposalRow('fixture-old-write')}.getClientRects().length`), 0);
+  assert.match(await evaluate(`${proposalRow('fixture-p2')}.innerText`), /当前模式设为只保存草稿/);
+  const blockedDraft = await evaluate(`${proposalRow('fixture-p3')}.innerText`);
+  assert.match(blockedDraft, /目标技能不属于当前 OpenViking 账号/);
+  assert.match(blockedDraft, /复盘已关闭/);
+  assert.doesNotMatch(blockedDraft, /draft_target_not_owned|draft_reviews_disabled|批准并应用/);
+  await press('批准并应用', proposalRow('fixture-p2'));
+  const draftNotice = `${panel}.querySelector('div.ove-message[role="status"]')`;
+  const conflictNotice = await retry(() => evaluate(`${draftNotice}?.innerText`), 'draft conflict notice');
+  assert.match(conflictNotice, /目标技能已变更，草稿未应用/);
+  assert.doesNotMatch(conflictNotice, /conflict|fixture-private-diagnostic/);
+  assert.match(await evaluate(`${proposalRow('fixture-p2')}.innerText`), /本地草稿/);
+  await press('批准并应用', proposalRow('fixture-p2'));
+  await retry(() => evaluate(`${proposalRow('fixture-p2')}?.querySelector('.ove-status').textContent === '已应用'`), 'draft applied and refreshed after one click');
+  assert.equal(await evaluate(`${panel}.innerText.includes('将此提案应用到技能？')`), false);
+  assert.match(await evaluate(`${draftNotice}.innerText`), /已应用/);
+  assert.doesNotMatch(await evaluate(`${proposalRow('fixture-p2')}.innerText`), /本地草稿|批准并应用/);
   const visible = node => evaluate(`[...${node}.querySelectorAll('li')].filter(item => item.getClientRects().length).length`);
   assert.equal(await visible(latestRows('proposals')), 3);
-  assert.equal(await evaluate(`${latestRows('proposals')}.innerText.includes('fixture-p4')`), false);
-  await evaluate(`${latestRows('proposals')}.querySelector('summary').click()`);
-  assert.equal(await visible(latestRows('proposals')), 5);
-  await evaluate(`${latestRows('proposals')}.querySelector('summary').click()`);
+  assert.equal(await evaluate(`${proposalRow('fixture-p2')}.getClientRects().length`), 0);
+  assert.equal(await evaluate(`${latestRows('proposals')}.innerText.includes('fixture-p5')`), false);
+  const olderProposals = `${latestRows('pending-proposals')}.querySelector('summary')`;
+  await evaluate(`${olderProposals}.click()`);
+  assert.equal(await visible(latestRows('proposals')), 4);
+  for (const id of ['fixture-p4', 'fixture-p5']) {
+    const legacyDraft = await evaluate(`${proposalRow(id)}.innerText`);
+    assert.match(legacyDraft, /保存此草稿时未记录原因/);
+    assert.doesNotMatch(legacyDraft, /draft_legacy|批准并应用/);
+  }
+  await evaluate(`${olderProposals}.click()`);
   for (const sessionId of ['fixture-run-3', 'fixture-run-4', 'fixture-timeout']) {
     await fill('会话 ID', sessionId);
     await inPanel('运行复盘');
@@ -349,13 +420,41 @@ try {
   await inPanel('批准');
   await inPanel('取消');
   await inPanel('批准');
-  await inPanel('确认');
+  const skillRow = `[...${latestRows('proposals')}.querySelectorAll('li')].find(row => row.querySelector('strong')?.textContent === ${JSON.stringify(uri)})`;
+  async function confirmAndCheckApproval(progressStatus, expectedStatus) {
+    await cdp('Fetch.enable', { patterns: [{ urlPattern: origin + path + '*', requestStage: 'Request' }] });
+    try {
+      const [approval] = await Promise.all([nextEvent('Fetch.requestPaused'), inPanel('确认')]);
+      assert.equal(approval.request.method, 'POST');
+      await retry(() => evaluate(`${processed}?.querySelector('summary').innerText.includes(${JSON.stringify(progressStatus)})`), 'live approval progress before POST');
+      assert.equal(await evaluate(`${processed}.open`), false);
+      assert.equal(await evaluate(`document.activeElement === ${processed}.querySelector('summary')`), true);
+      assert.equal(await evaluate(`${skillRow}.getClientRects().length`), 0);
+      const [snapshot] = await Promise.all([nextEvent('Fetch.requestPaused'), cdp('Fetch.continueRequest', { requestId: approval.requestId })]);
+      assert.equal(snapshot.request.method, 'GET');
+      await retry(() => evaluate(`${processed}.querySelector('summary').innerText.includes(${JSON.stringify(expectedStatus)})`), 'POST status before dashboard GET');
+      assert.equal(await evaluate(`${processed}.open`), false);
+      await cdp('Fetch.continueRequest', { requestId: snapshot.requestId });
+    } finally {
+      await cdp('Fetch.disable');
+    }
+    await retry(() => evaluate(`!${panel}.querySelector('header button').disabled`), 'dashboard GET applied');
+    assert.match(await evaluate(`${processed}.querySelector('summary').innerText`), new RegExp(expectedStatus));
+    await evaluate(`${processed}.querySelector('summary').click()`);
+  }
+  await confirmAndCheckApproval('应用中', '写入待核验');
+  assert.match(await evaluate(`${skillRow}.innerText`), /写入待核验/);
+  assert.match(await evaluate(`${proposalRow('fixture-old-write')}.innerText`), /写入待核验|核验写入/);
+  await press('核验写入', skillRow);
+  await text('核验上一次写入的结果？');
+  await confirmAndCheckApproval('核验中', '已应用');
   await text('技能版本已核验，搜索索引尚未确认。');
-  await inPanel('回滚');
+  await press('回滚', skillRow);
   await inPanel('确认');
   await text('已回滚');
   await text('已核验技能移除，搜索索引尚未确认。');
   assert.equal(await evaluate(`${panel}.innerText.includes('技能版本已核验，搜索索引尚未确认。')`), false);
+  await evaluate(`${processed}.querySelector('summary').click()`);
   assert.equal(await evaluate(`${panel}.querySelector('.ove-advanced').open`), false);
   assert.equal(await evaluate(`${panel}.querySelector('.ove-advanced input').getClientRects().length`), 0);
   await fill('复盘模式', 'shadow');
@@ -414,8 +513,51 @@ try {
   assert.equal(await evaluate(`${versions}.open`), false);
   await evaluate(`${versions}.querySelector('summary').click()`);
   await text('已回滚');
+  await fill('会话 ID', 'fixture-batch');
+  await inPanel('运行复盘');
+  await text('batch-applied');
+  const batchButton = '一键批准所有提案';
+  await text(batchButton);
+  const batchRequests = [
+    ['approve', 'batch-applied'], ['applyDraft', 'batch-conflict'], ['approve', 'batch-error'],
+    ['applyDraft', 'batch-old-draft'], ['approve', 'batch-needs-check'],
+  ];
+  assert.equal(await evaluate(`${proposalRow('batch-old-draft')}.getClientRects().length`), 0);
+  await cdp('Fetch.enable', { patterns: [{ urlPattern: origin + path + '*', requestStage: 'Request' }] });
+  try {
+    let [paused] = await Promise.all([nextEvent('Fetch.requestPaused'), inPanel(batchButton)]);
+    for (const [index, [action, id]] of batchRequests.entries()) {
+      assert.equal(paused.request.method, 'POST');
+      assert.deepEqual(JSON.parse(paused.request.postData), { action, input: { id } });
+      await text(`已处理 ${index} / 5 项`);
+      if (index === 0) {
+        await text('应用中');
+        assert.equal(await evaluate(`${processed}.open`), false);
+        assert.equal(await evaluate(`${proposalRow(id)}.getClientRects().length`), 0);
+        assert.equal(await evaluate(`[...${panel}.querySelectorAll('button')].find(b => b.textContent === ${JSON.stringify(batchButton)}).disabled`), true);
+      }
+      if (index === 1) await text('已应用 1 项');
+      [paused] = await Promise.all([nextEvent('Fetch.requestPaused'), cdp('Fetch.continueRequest', { requestId: paused.requestId })]);
+    }
+    assert.equal(paused.request.method, 'GET');
+    for (const copy of ['已处理 5 / 5 项', '已应用 2 项', '待核验 1 项', '未确认应用 2 项']) await text(copy);
+    await cdp('Fetch.continueRequest', { requestId: paused.requestId });
+  } finally {
+    await cdp('Fetch.disable');
+  }
+  await retry(() => evaluate(`!${panel}.querySelector('header button').disabled`), 'batch dashboard refreshed');
+  assert.match(await evaluate(`${proposalRow('batch-conflict')}.innerText`), /本地草稿/);
+  assert.match(await evaluate(`${proposalRow('batch-error')}.innerText`), /待处理/);
+  assert.match(await evaluate(`${proposalRow('batch-blocked')}.innerText`), /目标技能已归档/);
+  assert.match(await evaluate(`${processed}.querySelector('summary').innerText`), /待核验 \(2\)/);
+  const batchDetails = `[...${panel}.querySelectorAll('details')].find(item => item.querySelector('summary')?.textContent === '查看每项结果')`;
+  await evaluate(`${batchDetails}.querySelector('summary').click()`);
+  const perItem = await evaluate(`[...${batchDetails}.querySelectorAll('li')].map(item => item.textContent)`);
+  assert.deepEqual(perItem.map(item => item.split(' · ')[0]), batchRequests.map(([, id]) => id));
+  assert.match(perItem[1], /目标技能已变更/);
+  assert.match(perItem[4], /写入待核验/);
   assert.deepEqual(exceptions, []);
-  console.log('Native React Settings exercised review, history, approval and rollback, thresholds, curator, usage, memory and both clear actions.');
+  console.log('Native React Settings exercised selective batch approval and live results, draft reasons and one-click apply, review, history, approval and rollback, thresholds, curator, usage, memory and both clear actions.');
 } catch (error) {
   // DSH may emit a connect URL during startup. Never dump it to test logs.
   for (const child of children) console.error(child.logs().replace(/https?:\/\/[^\s\x1b]+/g, '[url]'));

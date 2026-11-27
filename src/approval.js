@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { applyAttachmentOperations, validateAttachmentOperations } from './attachments.js';
 import { isSkillUri } from './evidence.js';
 import { SkillSnapshotConflict } from './ov-adapter.js';
-import { normalizeReviewErrorCode, reviewStreamErrorCode } from './review-errors.js';
+import { normalizeOvRequest, normalizeReviewErrorCode, reviewStreamErrorCode } from './review-errors.js';
 import { skillArchive } from './skill-archive.js';
 import * as review from './review.js';
 
@@ -48,7 +48,13 @@ function savedDiagnostic(note) {
   const stage = note?.diagnostic?.stage;
   if (!['dispatch', 'readback', 'index'].includes(stage)) return undefined;
   const errorCode = normalizeReviewErrorCode(note.diagnostic.errorCode) ?? 'unexpected_error';
-  return { stage, errorCode };
+  const ovRequest = normalizeOvRequest(note.diagnostic.ovRequest);
+  return { stage, errorCode, ...(ovRequest && { ovRequest }) };
+}
+
+function requestDiagnostic(stage, error) {
+  const ovRequest = normalizeOvRequest(error?.ovRequest);
+  return { stage, errorCode: reviewStreamErrorCode(error), ...(ovRequest && { ovRequest }) };
 }
 
 function publicRecord(record) {
@@ -100,7 +106,9 @@ export function createApprovalService({ directory, managedUri, adapter }) {
   function appendNote(record, status, diagnostic) {
     const last = record.history.at(-1);
     if (last?.status === status && last.diagnostic?.stage === diagnostic?.stage &&
-        last.diagnostic?.errorCode === diagnostic?.errorCode) return false;
+        last.diagnostic?.errorCode === diagnostic?.errorCode &&
+        last.diagnostic?.ovRequest?.status === diagnostic?.ovRequest?.status &&
+        last.diagnostic?.ovRequest?.operation === diagnostic?.ovRequest?.operation) return false;
     record.history.push({ status, at: new Date().toISOString(), ...(diagnostic && { diagnostic }) });
     return true;
   }
@@ -117,7 +125,7 @@ export function createApprovalService({ directory, managedUri, adapter }) {
     try {
       live = await readSnapshot();
     } catch (error) {
-      return note(record, 'write_unconfirmed', persist, { stage: 'readback', errorCode: reviewStreamErrorCode(error) });
+      return note(record, 'write_unconfirmed', persist, requestDiagnostic('readback', error));
     }
     if (snapshotHash(live) !== snapshotHash(expected)) {
       if (restoring || record.before !== null || !live || !adapter.matchesCreated?.(managedUri, expected, live)) {
@@ -131,17 +139,16 @@ export function createApprovalService({ directory, managedUri, adapter }) {
       await persist();
     }
     let indexed;
-    let indexError = 'approval_index_unconfirmed';
+    let indexDiagnostic = { stage: 'index', errorCode: 'approval_index_unconfirmed' };
     try {
       indexed = expected === null ? (await adapter.verifyAbsent?.(managedUri) ?? true) : await adapter.verifyIndex(managedUri, expected);
     } catch (error) {
-      indexError = reviewStreamErrorCode(error);
+      indexDiagnostic = requestDiagnostic('index', error);
     }
     if (!indexed) {
-      const diagnostic = { stage: 'index', errorCode: indexError };
-      if (record.before !== null) return note(record, 'index_unconfirmed', persist, diagnostic);
+      if (record.before !== null) return note(record, 'index_unconfirmed', persist, indexDiagnostic);
       // Creation and removal are already verified by exact package readback.
-      appendNote(record, 'index_unconfirmed', diagnostic);
+      appendNote(record, 'index_unconfirmed', indexDiagnostic);
     }
     return transition(record, restoring ? 'rolled_back' : 'applied', persist);
   }
@@ -177,9 +184,11 @@ export function createApprovalService({ directory, managedUri, adapter }) {
       const live = await readSnapshot();
       if (snapshotHash(live) !== snapshotHash(from)) return conflict(record, restoring, persist);
       input.signal?.throwIfAborted();
+      if (input.isCurrent?.() === false) return { status: 'draft_identity_unverified' };
       const previous = record.status;
       await transition(record, restoring ? 'restoring' : 'applying', persist);
-      let skipped = Boolean(input.signal?.aborted);
+      const changedConnection = input.isCurrent?.() === false;
+      let skipped = Boolean(input.signal?.aborted || changedConnection);
       let dispatch;
       if (!skipped) {
         try {
@@ -189,12 +198,12 @@ export function createApprovalService({ directory, managedUri, adapter }) {
         } catch (error) {
           if (error instanceof SkillSnapshotConflict) return conflict(record, restoring, persist);
           // A failed response can follow a committed write.
-          dispatch = { stage: 'dispatch', errorCode: reviewStreamErrorCode(error) };
+          dispatch = requestDiagnostic('dispatch', error);
         }
       }
       if (skipped) {
         await transition(record, previous, persist);
-        return { status: 'cancelled' };
+        return { status: changedConnection ? 'draft_identity_unverified' : 'cancelled' };
       }
       return reconcile(record, persist, dispatch);
     });

@@ -56,7 +56,32 @@ const MESSAGE_CODES = new Map([
 const LLM_CODES = new Set(['MALFORMED_RESPONSE', 'STREAM_CLOSED', 'RATE_LIMITED', 'AUTHENTICATION_FAILED', 'CONTEXT_OVERFLOW']);
 const INTERRUPTION_CODES = new Set(['TimeoutError', 'AbortError']);
 const OV_HTTP_MESSAGE = /^OpenViking request failed \(([1-5]\d{2})\)$/;
-const OV_CODES = ['ov_request_failed', 'ov_request_timeout', 'ov_network_error', 'ov_http_rate_limited', 'ov_http_server_error', 'ov_http_authentication_failed'];
+const OV_HTTP_CODES = Object.freeze({
+  400: 'ov_http_bad_request',
+  401: 'ov_http_authentication_failed',
+  403: 'ov_http_forbidden',
+  404: 'ov_http_not_found',
+  405: 'ov_http_method_not_allowed',
+  408: 'ov_http_request_timeout',
+  409: 'ov_http_conflict',
+  410: 'ov_http_gone',
+  413: 'ov_http_payload_too_large',
+  415: 'ov_http_unsupported_media_type',
+  422: 'ov_http_unprocessable_entity',
+  429: 'ov_http_rate_limited',
+  502: 'ov_http_bad_gateway',
+  503: 'ov_http_service_unavailable',
+  504: 'ov_http_gateway_timeout',
+});
+const OV_CODES = ['ov_request_failed', 'ov_request_timeout', 'ov_network_error', 'ov_http_server_error', ...Object.values(OV_HTTP_CODES)];
+const OV_OPERATIONS = new Set(['skill_detail', 'file_download', 'privacy_list', 'temp_upload',
+  'skill_search', 'skill_create', 'skill_remove', 'skill_replace']);
+
+export function normalizeOvRequest(value) {
+  if (Number.isInteger(value?.status) && value.status >= 100 && value.status <= 599 && OV_OPERATIONS.has(value.operation)) {
+    return { status: value.status, operation: value.operation };
+  }
+}
 const KNOWN_CODES = new Set([...REVIEW_CODES, ...MESSAGE_CODES.values(), ...LLM_CODES, ...INTERRUPTION_CODES, ...OV_CODES]);
 
 export function normalizeReviewErrorCode(value) {
@@ -65,10 +90,7 @@ export function normalizeReviewErrorCode(value) {
   const http = OV_HTTP_MESSAGE.exec(value);
   if (http) {
     const status = Number(http[1]);
-    if (status === 401 || status === 403) return 'ov_http_authentication_failed';
-    if (status === 429) return 'ov_http_rate_limited';
-    if (status >= 500) return 'ov_http_server_error';
-    return 'ov_request_failed';
+    return OV_HTTP_CODES[status] ?? (status >= 500 ? 'ov_http_server_error' : 'ov_request_failed');
   }
   return MESSAGE_CODES.get(value);
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.9
+
+- Verify the effective OpenViking account before writing private skills. Show why a proposal was saved locally and let users approve eligible drafts directly.
+- Add one-click approval for all eligible proposals, including older entries. Fold each proposal when approval starts, show results as they arrive, and keep unconfirmed writes available for verification.
+- Record OpenViking HTTP status and request operation in diagnostics. Limit repeated failures across new events from the same conversation and use a 15-minute default automatic review interval.
+
 ## 0.2.8
 
 - Use the reviewed session's model unless both reviewer provider and model IDs are configured.

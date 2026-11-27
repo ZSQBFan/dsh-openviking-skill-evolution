@@ -13,7 +13,7 @@ test('policy bounds turns, tools, duration and repeated failures', () => {
   let state;
   for (let seq = 0; seq < 3; seq++) state = automaticReviewProjection(state, { seq, type: 'error' });
   assert.equal(projectReviewPolicy(state, {}, 1, 0).reason, 'failure');
-  assert.equal(projectReviewPolicy({ committedEvidence: [], turns: 0, toolCalls: 0, failureCount: 0 }, {}).limits.cooldownMs, 30 * 60 * 1000);
+  assert.equal(projectReviewPolicy({ committedEvidence: [], turns: 0, toolCalls: 0, failureCount: 0 }, {}).limits.cooldownMs, 15 * 60 * 1000);
   assert.equal(projectReviewPolicy({ ...state, failure: false, failureCount: 0, turns: 10 }, {}, 1, 0).reason, 'turn_limit');
   assert.equal(projectReviewPolicy({ ...state, failure: false, failureCount: 0, turns: 0 }, {}, 1_800_000, 0).reason, 'duration_limit');
 });

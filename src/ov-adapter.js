@@ -36,7 +36,7 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
   function requireManaged(uri) {
     if (uri !== managedUri) throw Error('Unexpected skill scope');
   }
-  async function request(path, options = {}) {
+  async function request(operation, path, options = {}) {
     const response = await fetch(new URL(path, base), {
       ...options, redirect: 'error', headers: { ...headers, ...options.headers }, signal: AbortSignal.timeout(15000),
     }).catch(error => {
@@ -46,26 +46,27 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
     if (!response.ok) {
       const error = Error(`OpenViking request failed (${response.status})`);
       error.status = response.status;
+      error.ovRequest = { status: response.status, operation };
       if (response.status === 404) error.code = (await response.json().catch(() => null))?.error?.code;
       throw error;
     }
     return response;
   }
-  async function json(path, options) {
-    const payload = await (await request(path, options)).json();
+  async function json(operation, path, options) {
+    const payload = await (await request(operation, path, options)).json();
     if (payload.status !== 'ok' || !payload.result) throw Error('OpenViking returned an incomplete result');
     return payload.result;
   }
   async function assertNoSkillPrivacy() {
     // Listing returns target names only. Do not fetch or persist secret values.
-    const names = await json('/api/v1/privacy-configs/skill');
+    const names = await json('privacy_list', '/api/v1/privacy-configs/skill');
     if (!Array.isArray(names) || names.some(value => typeof value !== 'string') || names.includes(skill)) {
       throw Error('Skill privacy settings are present or could not be ruled out');
     }
   }
   async function detailOfSkill() {
     const query = new URLSearchParams({ target_uri: target, level: '2', include_files: 'true', include_integrity: 'true', include_source: 'true' });
-    const detail = await json(`${endpoint}?${query}`);
+    const detail = await json('skill_detail', `${endpoint}?${query}`);
     if (detail.root_uri !== packageUri) throw Error('Unexpected skill package');
     return detail;
   }
@@ -96,7 +97,7 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
         throw Error('Skill package exceeds supported snapshot limits');
       }
       const query = new URLSearchParams({ uri: item.uri });
-      const bytes = Buffer.from(await (await request(`/api/v1/content/download?${query}`)).arrayBuffer());
+      const bytes = Buffer.from(await (await request('file_download', `/api/v1/content/download?${query}`)).arrayBuffer());
       if (bytes.length !== item.size || sha256(bytes) !== item.sha256) throw Error('Skill changed during the snapshot');
       if (path === 'SKILL.md') {
         if (sha256(bytes) !== detail.content_sha256) throw Error('Skill Markdown differs from the manifest');
@@ -111,7 +112,7 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
     if (signal?.aborted) return null;
     const form = new FormData();
     form.append('file', new Blob([skillArchive(next)], { type: 'application/zip' }), `${skill}.zip`);
-    const { temp_file_id } = await json('/api/v1/resources/temp_upload', { method: 'POST', body: form });
+    const { temp_file_id } = await json('temp_upload', '/api/v1/resources/temp_upload', { method: 'POST', body: form });
     if (typeof temp_file_id !== 'string' || !temp_file_id) throw Error('OpenViking did not accept the temporary archive');
     if (signal?.aborted) return null;
     return JSON.stringify({ target_uri: target, temp_file_id, wait: true,
@@ -119,7 +120,7 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
   }
 
   async function indexedSkills(scope) {
-    const response = await json('/api/v1/skills/find', {
+    const response = await json('skill_search', '/api/v1/skills/find', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query: skill, target_uri: scope, limit: 20, score_threshold: 0 }),
     });
@@ -152,13 +153,13 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
       requireManaged(uri);
       const body = await upload(next, signal);
       if (!body) return false;
-      await json('/api/v1/skills', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      await json('skill_create', '/api/v1/skills', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
     },
     async remove(uri, _previous, signal) {
       requireManaged(uri);
       if (signal?.aborted) return false;
       const query = new URLSearchParams({ target_uri: target });
-      await json(`${endpoint}?${query}`, { method: 'DELETE' });
+      await json('skill_remove', `${endpoint}?${query}`, { method: 'DELETE' });
     },
     async verifyAbsent(uri) {
       requireManaged(uri);
@@ -178,7 +179,7 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
         if (!isDeepStrictEqual(live, previous)) throw new SkillSnapshotConflict('Skill changed during archive upload');
         if (signal?.aborted) return false;
       }
-      await json(endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body });
+      await json('skill_replace', endpoint, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body });
     },
     async verifyIndex(uri, snapshot) {
       requireManaged(uri);

@@ -39,9 +39,13 @@ const diagnosis = (stage, errorCode) => ({ errorCode, diagnostic: { stage, error
 const voted = (status, diagnosis) => ({ status, uri, action: 'patch', ...diagnosis });
 
 test('known dispatch failures survive re-open while write remains unconfirmed', async t => {
-  const f = await fixture(t, { replace: () => { throw Error('OpenViking request failed (503)'); } });
+  const ovRequest = { status: 503, operation: 'skill_replace' };
+  const f = await fixture(t, { replace: () => {
+    throw Object.assign(Error('OpenViking request failed (503)'), { ovRequest: { ...ovRequest, body: 'private body' } });
+  } });
   const first = await f.create();
-  const info = diagnosis('dispatch', 'ov_http_server_error');
+  const info = diagnosis('dispatch', 'ov_http_service_unavailable');
+  info.diagnostic.ovRequest = ovRequest;
   assert.deepEqual(await first.submit(proposal), { status: 'write_unconfirmed', ...info });
   const reopened = await f.create();
   assert.deepEqual(await reopened.vote('approve', proposal.proposalId), voted('write_unconfirmed', info));

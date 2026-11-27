@@ -29,9 +29,12 @@ export async function startWriterFixture() {
   const server = createServer(async (req, res) => {
     const json = result => res.setHeader('content-type', 'application/json').end(JSON.stringify({ status: 'ok', result }));
     try {
-      assert.equal(req.headers['x-openviking-user'], identity);
+      assert.equal(req.headers.authorization, 'Bearer isolated-fixture-key');
+      assert.equal(req.headers['x-openviking-user'], undefined);
       const { pathname, searchParams } = new URL(req.url, 'http://127.0.0.1');
       switch (`${req.method} ${pathname}`) {
+        case 'GET /api/v1/system/status':
+          return json({ initialized: true, user: identity });
         case `GET ${skillPath}`:
           assert.equal(searchParams.get('target_uri'), target);
           return json({ root_uri: root, description, content: body, content_sha256: sha256(body), files: [
@@ -72,6 +75,6 @@ export async function startWriterFixture() {
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  return { config: { baseUrl: `http://127.0.0.1:${server.address().port}`, user: identity, sendIdentityHeaders: true },
+  return { config: { baseUrl: `http://127.0.0.1:${server.address().port}`, user: 'owner', apiKey: 'isolated-fixture-key' },
     liveBody: () => body, writes, errors, close() { server.close(); server.closeAllConnections(); } };
 }

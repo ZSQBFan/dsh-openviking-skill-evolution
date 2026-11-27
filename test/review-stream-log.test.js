@@ -2,14 +2,17 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { applyCreateDiff, applySkillDiff } from '../src/review.js';
 import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { mountEvolution } from '../src/evolution.js';
+import { createGovernance } from '../src/governance.js';
+import { createOpenVikingAdapter } from '../src/ov-adapter.js';
 
 async function fixture(t, chunks, { evidence = [], onRequest, settings = {}, events: eventFixture, agents = [],
   sessionRoute = { provider: 'session-provider', model: 'session-model' },
-  expectedRoute = { provider: 'fixture-provider', model: 'fixture-model' } } = {}) {
+  expectedRoute = { provider: 'fixture-provider', model: 'fixture-model' }, writer } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'skill-review-log-'));
   const logDirectory = join(directory, 'review-stream');
   const hooks = {};
@@ -35,7 +38,7 @@ async function fixture(t, chunks, { evidence = [], onRequest, settings = {}, eve
     },
     sessionProjections: { async register(p) { return { stateOf: () => p.key.endsWith('/automatic-evidence') ? { events } : {} }; } },
   };
-  const mount = () => mountEvolution(ctx, { directory, owner: 'fixture', settings: {
+  const mount = () => mountEvolution(ctx, { directory, owner: 'fixture', writer, settings: {
     mode: 'shadow', provider: 'fixture-provider', model: 'fixture-model', ...settings,
   } }, { stateOf: () => ({ evidence }) });
   return { directory, logDirectory, agent, mount, hooks };
@@ -92,6 +95,23 @@ const answer = proposal => [{ type: 'text-delta', text: JSON.stringify({ decisio
 async function getShadow(f) {
   return JSON.parse(await readFile(join(f.directory, 'governance.json'), 'utf8')).shadows[0];
 }
+
+test('a rejected snapshot request records only its HTTP status and operation', async t => {
+  const server = createServer((_req, res) => res.writeHead(400).end('PRIVATE_RESPONSE'));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const adapter = createOpenVikingAdapter({ origin: `http://127.0.0.1:${server.address().port}`,
+    managedUri: uri, mode: 'isolated-single-writer' });
+  const f = await fixture(t, answer({ action: 'create', uri, baseSha256: null, reason: 'Reusable result',
+    description: 'Demo', body: 'Verify the result.' }), { writer: { adapter }, settings: { mode: 'auto' } });
+  const result = await (await f.mount()).run(f.agent, 'automatic');
+  assert.equal(result.errorCode, 'ov_http_bad_request');
+  assert.deepEqual(result.ovRequest, { status: 400, operation: 'skill_detail' });
+  assert.deepEqual((await readTrace(f.logDirectory)).ovRequest, result.ovRequest);
+  const ledger = await readFile(join(f.directory, 'governance.json'), 'utf8');
+  assert.doesNotMatch(ledger, /PRIVATE_RESPONSE/);
+  assert.deepEqual(JSON.parse(ledger).runs[0].ovRequest, result.ovRequest);
+});
 
 test('manual review quotes an older base and produces an exact patch without model hunk math', async t => {
   let request;
@@ -164,6 +184,43 @@ test('failed validation throttles manual and automatic retries across restart wi
   const afterCooldown = await f.mount();
   assert.deepEqual(await afterCooldown.run(f.agent, 'manual'), { status: 'no_change' });
   assert.deepEqual(await afterCooldown.run(f.agent, 'manual'), { status: 'deduped' });
+});
+
+test('generic OpenViking failures share a retry budget across new evidence, clear and restart', async t => {
+  const start = Date.now();
+  const minute = 60_000;
+  t.mock.timers.enable({ apis: ['Date'], now: start });
+  const server = createServer((_req, res) => res.writeHead(418).end());
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const adapter = createOpenVikingAdapter({ origin: `http://127.0.0.1:${server.address().port}`,
+    managedUri: uri, mode: 'isolated-single-writer' });
+  const events = [{ type: 'user/message', seq: 1, data: {} }, { type: 'turn/end', seq: 2, data: {} }];
+  let modelCalls = 0;
+  const f = await fixture(t, answer({ action: 'create', uri, baseSha256: null, reason: 'Reusable result',
+    description: 'Demo', body: 'Verify the result.' }), { writer: { adapter }, settings: { mode: 'auto' },
+    events, onRequest: () => { modelCalls++; } });
+  let { run } = await f.mount();
+  const advanceEvidence = () => events.push({ type: 'turn/end', seq: events.at(-1).seq + 1, data: {} });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    assert.equal((await run(f.agent, 'automatic')).errorCode, 'ov_request_failed');
+    advanceEvidence();
+    if (attempt === 0) assert.deepEqual(await run(f.agent, 'automatic'), {
+      status: 'cooldown', retryAt: new Date(start + 15 * minute).toISOString(),
+    });
+    if (attempt < 2) t.mock.timers.tick(15 * minute);
+  }
+  const governance = await createGovernance({ directory: f.directory, owner: 'fixture' });
+  assert.deepEqual(governance.durableHistory().map(row => [row.seq, row.failureCount]), [[4, 3], [3, 2], [2, 1]]);
+  assert.equal((await governance.clearHistory({ confirm: true })).count, 3);
+  ({ run } = await f.mount());
+  assert.deepEqual(await run(f.agent, 'manual'), {
+    status: 'retry_blocked', retryAt: new Date(start + 60 * minute).toISOString(),
+  });
+  assert.equal(modelCalls, 3);
+  t.mock.timers.tick(30 * minute);
+  assert.equal((await run(f.agent, 'automatic')).errorCode, 'ov_request_failed');
+  assert.equal(modelCalls, 4);
 });
 
 test('review inherits the complete source session route when the override is empty or incomplete', async t => {

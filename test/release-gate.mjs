@@ -16,6 +16,8 @@ const baselineLine = 'Run smoke.';
 export const baseline = '---\nname: demo\ndescription: Demo.\n---\n\n' + baselineLine + '\n';
 export const reviewedLine = 'Run smoke and check exit status.';
 export const reviewed = baseline.replace(baselineLine, reviewedLine);
+const archivedLine = 'Run smoke and check exit status before archiving the output.';
+const finalBody = reviewed.replace(reviewedLine, archivedLine);
 export const provider = 'release-fixture';
 export const model = 'release-reviewer';
 
@@ -72,7 +74,8 @@ export async function verifyPublicReview({ request, session, liveBody, observed 
     const card = proposals.find(item => item.id === result.proposalId);
     assert.equal(card?.status, status);
     assert.equal(card.sessionId, sessionId);
-    assert.deepEqual(card.actions, status === 'shadow' ? ['preview'] : ['preview', 'approve', 'reject']);
+    assert.deepEqual(card.actions, status === 'shadow' ? ['preview', 'applyDraft'] : ['preview', 'approve', 'reject']);
+    if (status === 'shadow') assert.equal(card.draftReason, 'draft_mode');
     const row = history.find(item => item.proposalId === result.proposalId);
     assert.equal(row?.status, status);
     assert.equal(row.source, 'manual');
@@ -96,7 +99,7 @@ export async function verifyPublicReview({ request, session, liveBody, observed 
   assert.equal((await request()).proposals.find(item => item.id === approved)?.status, 'applied');
 
   await settings('shadow', start.settings.revision + 1, { provider: '', model: '' });
-  const shadow = await run('shadow', 'shadow', reviewed, 'Run smoke and check exit status before archiving the output.');
+  const shadow = await run('shadow', 'shadow', reviewed, archivedLine);
   assert.equal(await liveBody(), reviewed, 'shadow proposal must not write');
 
   await settings('approval', start.settings.revision + 2);
@@ -104,9 +107,12 @@ export async function verifyPublicReview({ request, session, liveBody, observed 
   assert.equal(await liveBody(), reviewed, 'second pending proposal must not write');
   assert.equal(observed.length, 3, 'all three proposals must use reviewer approval');
   assert.equal(new Set([approved, shadow, pending]).size, 3);
+  assert.equal((await request('applyDraft', { id: shadow })).status, 'applied');
+  assert.equal(await liveBody(), finalBody);
+  assert.equal((await request('applyDraft', { id: shadow })).status, 'missing');
   const { proposals } = await request();
   assert.deepEqual(new Map(proposals.map(({ id, status }) => [id, status])), new Map([
-    [approved, 'applied'], [shadow, 'shadow'], [pending, 'pending'],
+    [approved, 'applied'], [shadow, 'applied'], [pending, 'pending'],
   ]));
   assert.deepEqual(await request('clearHistory', { confirm: false }), { status: 'invalid_confirm', count: 0 });
   const historySize = (await request()).history.length;
@@ -120,9 +126,9 @@ export async function verifyPublicReview({ request, session, liveBody, observed 
   assert.deepEqual(afterProposals.proposals, []);
   assert(afterProposals.preservedVersions.some(item => item.id === approved && item.actions.includes('rollback')));
   assert.equal((await request('approve', { id: pending })).status, 'proposal_cleared');
-  assert.equal(await liveBody(), reviewed, 'clearing does not alter the applied skill');
+  assert.equal(await liveBody(), finalBody, 'clearing does not alter the applied skill');
   return { path: dashboardPath, proposals: { applied: approved, shadow, pending }, approvals: observed,
-    bodySha256: { initial: sha256(baseline), final: sha256(reviewed) }, cleared: { history: historySize, proposals: proposals.length } };
+    bodySha256: { initial: sha256(baseline), final: sha256(finalBody) }, cleared: { history: historySize, proposals: proposals.length } };
 }
 
 export async function verifyPackedReview(packageDir, name, version) {
@@ -192,7 +198,7 @@ export async function verifyPackedReview(packageDir, name, version) {
         return result.data;
       },
     });
-    assert.equal(writes, 1, 'fixture write count');
+    assert.equal(writes, 2, 'fixture write count');
     return { ...report, writes };
   } finally {
     for (const fn of dispose) fn?.();

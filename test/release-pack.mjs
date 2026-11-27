@@ -14,7 +14,7 @@ const required = [
   'locale/en.json', 'locale/zh.json', 'docs/memory-link.md', 'docs/m2-api-probe.md',
   'client.js', 'src/approval.js', 'src/automatic-review.js', 'src/curator.js', 'src/dashboard.js',
   'src/evidence.js', 'src/evolution.js', 'src/governance.js', 'src/review-errors.js', 'src/review-retry.js',
-  'src/review-stream-log.js', 'src/memory-link.js', 'src/ov-adapter.js', 'src/review.js', 'src/skill-archive.js', 'src/attachments.js', 'src/skill-tool.js',
+  'src/review-stream-log.js', 'src/memory-link.js', 'src/native-identity.js', 'src/ov-adapter.js', 'src/review.js', 'src/skill-archive.js', 'src/attachments.js', 'src/skill-tool.js',
 ];
 const allowed = new Set([...required, 'LICENSE', 'LICENSE.md']);
 const work = mkdtempSync(join(tmpdir(), 'skill-evolution-pack-'));

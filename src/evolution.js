@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import { skillManageTool } from './skill-tool.js';
 import { automaticReviewProjection, buildEvidencePacket, createDshReviewAdapter, parseReviewerOutput, projectReviewPolicy, reviewerOperationToProposal } from './automatic-review.js';
 import { createCurator } from './curator.js';
-import { createReviewStreamLog, createReviewStreamTrace, reviewStreamErrorCode } from './review-stream-log.js';
-import { applicableAttempt, consumesReviewEvidence, isFailureOutcome, retryReviewDecision } from './review-retry.js';
+import { normalizeOvRequest, reviewStreamErrorCode } from './review-errors.js';
+import { createReviewStreamLog, createReviewStreamTrace } from './review-stream-log.js';
+import { applicableAttempt, consumesReviewEvidence, isFailureOutcome, matchingFailureTimes, retryReviewDecision } from './review-retry.js';
 import { mountDashboard } from './dashboard.js';
 import { isSkillUri } from './evidence.js';
 import { createGovernance } from './governance.js';
+import { createNativeConnectionResolver } from './native-identity.js';
 import { memoryConnectionStatus, memoryLinkProjection, memoryLinkStatus } from './memory-link.js';
 import { applyCreateDiff, applySkillDiff, buildCreateDiff, buildReplacementDiff, listReviewCandidates, review } from './review.js';
 
@@ -90,37 +91,17 @@ function bindProposal(output, packet, state, sessionId, belongs) {
   return validateProposal(proposal, state, belongs);
 }
 
-export function resolveNativeConnection(runtime, directory) {
-  const config = runtime?.config;
-  if (!config || config.enabled === false || !/^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(config.user ?? '')) return null;
-  let base;
-  try { base = new URL(config.baseUrl || config.endpoint); } catch { return null; }
-  if (!(base.protocol === 'https:' || (base.protocol === 'http:' && base.hostname === '127.0.0.1' && base.port)) ||
-      base.pathname !== '/' || base.search || base.hash || base.username || base.password) return null;
-  const nativeHeaders = {};
-  if (config.apiKey) nativeHeaders.Authorization = `Bearer ${config.apiKey}`;
-  if (config.sendIdentityHeaders) {
-    if (config.account) nativeHeaders['X-OpenViking-Account'] = config.account;
-    nativeHeaders['X-OpenViking-User'] = config.user;
-  }
-  if (!config.apiKey && !config.sendIdentityHeaders) return null;
-  const identity = digest(JSON.stringify([base.origin, config.account ?? '', config.user]));
-  return { owner: config.user, versions: join(directory, 'native', identity),
-    writer: { origin: base.origin, nativeHeaders, mode: 'native-verified-readback' } };
-}
-
 export async function mountEvolution(ctx, options, evidence) {
   const resolveConnection = options.owner === null
-    ? () => resolveNativeConnection(ctx.get('openvikingMemory'), options.directory) : undefined;
+    ? createNativeConnectionResolver(() => ctx.get('openvikingMemory'), options.directory) : undefined;
   const governance = await createGovernance({ ...options, resolveConnection });
   const profileCurator = await createCurator(options);
   const streamLog = createReviewStreamLog(options.directory);
   const logWarning = () => { ctx.logger?.warn('Skill evolution: review stream log unavailable'); };
   await streamLog.prune().catch(logWarning);
   const curators = new Map();
-  async function getCurator() {
-    const active = resolveConnection?.();
-    if (!active) return profileCurator;
+  async function getCurator(active) {
+    if (!active?.owner || !resolveConnection) return profileCurator;
     if (!curators.has(active.versions)) {
       const pending = createCurator({ directory: active.versions, owner: active.owner });
       curators.set(active.versions, pending);
@@ -186,7 +167,8 @@ export async function mountEvolution(ctx, options, evidence) {
     if (source === 'manual' && agent.status === 'running') return { status: 'review_source_busy' };
     const lastAttempt = attempts.get(sessionId);
     const started = Date.now();
-    const retry = retryReviewDecision({ row: lastAttempt, seq, source, config, now: started });
+    const history = isFailureOutcome(lastAttempt ?? {}) ? governance.durableHistory() : undefined;
+    const retry = retryReviewDecision({ row: lastAttempt, history, seq, source, config, now: started });
     if (retry) return retry;
     const at = new Date(started).toISOString();
     const signal = AbortSignal.any([scope.signal, AbortSignal.timeout(config.reviewTimeoutMs), ...(requestedSignal ? [requestedSignal] : [])]);
@@ -226,7 +208,8 @@ export async function mountEvolution(ctx, options, evidence) {
           return outcome;
         }
         const bases = reviewBases(snapshot);
-        const owner = options.owner ?? resolveConnection?.()?.owner;
+        const active = await governance.connection();
+        const owner = options.owner ?? active?.owner;
         evidenceBytes = Buffer.byteLength(JSON.stringify({ events: packet, bases, owner }));
         trace = createReviewStreamTrace();
         traceId = randomUUID();
@@ -235,7 +218,7 @@ export async function mountEvolution(ctx, options, evidence) {
         const output = await reviewer({ packet, bases, owner, signal, onChunk: trace.onChunk });
         signal.throwIfAborted();
         stage = 'validate';
-        proposal = bindProposal(output, packet, snapshot, sessionId, governance.belongs);
+        proposal = bindProposal(output, packet, snapshot, sessionId, uri => governance.belongs(uri, active));
       }
       if (proposal) stage = 'submit';
       outcome = proposal ? await submitProposal(proposal, config, signal, 'created_by_review') : { status: 'no_change' };
@@ -244,7 +227,8 @@ export async function mountEvolution(ctx, options, evidence) {
     } catch (error) {
       const errorCode = reviewStreamErrorCode(error, signal);
       const status = errorCode === 'TimeoutError' ? 'timed_out' : errorCode === 'AbortError' ? 'cancelled' : 'failed';
-      outcome = { status, reason: errorCode, errorCode, stage };
+      const ovRequest = normalizeOvRequest(error?.ovRequest);
+      outcome = { status, reason: errorCode, errorCode, stage, ...(ovRequest && { ovRequest }) };
       return outcome;
     } finally {
       try {
@@ -254,14 +238,14 @@ export async function mountEvolution(ctx, options, evidence) {
           const row = { ...outcome, stage, sessionId, source, seq, at, durationMs, provider, model,
             finishedAt: new Date(finished).toISOString(), settingsRevision: config.revision, traceId, evidenceBytes };
           if (isFailureOutcome(row)) {
-            const sameAttempt = lastAttempt?.seq === seq && isFailureOutcome(lastAttempt) && applicableAttempt(lastAttempt, config.revision);
-            row.failureCount = sameAttempt ? (lastAttempt.failureCount ?? 1) + 1 : 1;
+            row.failureCount = 1 + matchingFailureTimes(history ?? governance.durableHistory(), row, finished).length;
           }
           await governance.log(row);
           rememberRun(row);
           if (trace) {
             await streamLog.write({ version: 1, traceId, at, durationMs, sessionId, source, seq, status: outcome.status,
-              stage, errorCode: outcome.errorCode, evidenceBytes, ...trace.snapshot() }).catch(logWarning);
+              stage, errorCode: outcome.errorCode, ovRequest: outcome.ovRequest ?? outcome.diagnostic?.ovRequest,
+              evidenceBytes, ...trace.snapshot() }).catch(logWarning);
           }
         }
       } finally {
@@ -289,8 +273,9 @@ export async function mountEvolution(ctx, options, evidence) {
     if (event.type === 'tool/result') background(async () => {
       const read = evidence.stateOf(session).evidence.find(item => item.seq === event.seq && item.uri);
       if (!read) return;
-      const curator = await getCurator();
-      if (settings.mode !== 'off' && resolveConnection?.()) await curator.adopt(read.uri, 'observed_read');
+      const active = await governance.connection();
+      const curator = await getCurator(active);
+      if (settings.mode !== 'off' && active?.owner && resolveConnection) await curator.adopt(read.uri, 'observed_read');
       return curator.loaded({ uri: read.uri, sessionId: id, seq: event.seq, at: Date.now() });
     });
     if (event.type === 'turn/end' && settings.mode !== 'off') {
@@ -305,19 +290,22 @@ export async function mountEvolution(ctx, options, evidence) {
       });
     }
   });
-  ctx.on('tools/pre-execute', async (exec, next) => (await getCurator()).blocks(exec.name, exec.arguments)
-    ? { kind: 'deny', reason: 'This OpenViking skill is archived in this DSH profile.' } : next());
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    if (!/^mcp__openviking__(read|multi_read|download|open|overview|abstract)$/.test(exec.name)) return next();
+    const curator = await getCurator(await governance.connection());
+    return curator.blocks(exec.name, exec.arguments)
+      ? { kind: 'deny', reason: 'This OpenViking skill is archived in this DSH profile.' } : next();
+  });
   ctx.effect(() => {
-    const interval = setInterval(() => background(async () => (await getCurator()).scan()), 60_000);
+    const interval = setInterval(() => background(async () => (await getCurator(await governance.connection())).scan()), 60_000);
     interval.unref?.();
     return () => { scope.abort(); clearInterval(interval); for (const timer of timers) clearTimeout(timer); };
   }, 'skill-evolution-runtime');
 
   async function submitProposal(proposal, config, signal, source) {
-    const curator = await getCurator();
-    if (curator.isArchived(proposal.uri)) return { status: 'archived' };
-    const result = await governance.submit(proposal, { revision: config.revision, signal });
-    if (result.status === 'applied' && proposal.action === 'create') await curator.adopt(proposal.uri, source);
+    const isArchived = async (uri, active) => (await getCurator(active)).isArchived(uri);
+    const result = await governance.submit(proposal, { revision: config.revision, signal, isArchived });
+    if (result.status === 'applied' && proposal.action === 'create') await (await getCurator(await governance.connection())).adopt(proposal.uri, source);
     return { ...result, proposalId: proposal.proposalId };
   }
 
@@ -354,7 +342,8 @@ export async function mountEvolution(ctx, options, evidence) {
           const state = evidence.stateOf(session);
           const inspection = inspected.get(session)?.get(input.uri);
           const latest = inspection && { ...state, evidence: [...state.evidence, inspection].sort((a, b) => a.seq - b.seq) };
-          proposal = validateProposal(reviewerOperationToProposal(input, { evidence: { sessionId: sessionKey(session), sequences, source: 'foreground' } }), latest ?? state, governance.belongs);
+          const active = input.action === 'create' ? await governance.connection() : undefined;
+          proposal = validateProposal(reviewerOperationToProposal(input, { evidence: { sessionId: sessionKey(session), sequences, source: 'foreground' } }), latest ?? state, uri => governance.belongs(uri, active));
         } catch (error) {
           return { status: 'invalid_proposal', reason: error.message };
         }
@@ -378,36 +367,45 @@ export async function mountEvolution(ctx, options, evidence) {
     },
     settings: input => governance.update(input),
     preview: input => governance.preview(input.id),
-    curator: async () => (await getCurator()).scan({ manual: true }),
-    adopt: async input => (await getCurator()).adopt(input.uri),
-    archive: async input => (await getCurator()).archive(input.uri),
-    restore: async input => (await getCurator()).restore(input.uri),
+    async applyDraft(input, { signal }) {
+      const isArchived = async (uri, active) => (await getCurator(active)).isArchived(uri);
+      const result = await governance.applyDraft(input.id, { signal, isArchived });
+      if (result.status === 'applied' && result.action === 'create') await (await getCurator(await governance.connection())).adopt(result.uri, 'created_by_review');
+      return result;
+    },
+    curator: async () => (await getCurator(await governance.connection())).scan({ manual: true }),
+    adopt: async input => (await getCurator(await governance.connection())).adopt(input.uri),
+    archive: async input => (await getCurator(await governance.connection())).archive(input.uri),
+    restore: async input => (await getCurator(await governance.connection())).restore(input.uri),
     clearProposals: input => governance.clearProposals(input),
     clearHistory: input => governance.clearHistory(input),
   };
   for (const action of ['approve', 'reject', 'rollback']) actions[action] = async (input, { signal }) => {
     const result = await governance.vote(action, input.id, signal);
-    if (action === 'approve' && result.status === 'applied' && result.action === 'create') await (await getCurator()).adopt(result.uri, 'created_by_review');
+    if (action === 'approve' && result.status === 'applied' && result.action === 'create') await (await getCurator(await governance.connection())).adopt(result.uri, 'created_by_review');
     return result;
   };
   ctx.inject(['connection'], connectionCtx => {
     mountDashboard(connectionCtx, { actions, snapshot: async ({ sessionId } = {}) => {
-      const settings = governance.settings();
-      const skillState = (await getCurator()).snapshot();
-      const canManage = Boolean(options.owner ?? resolveConnection?.()?.owner);
+      const active = await governance.connection();
+      const settings = governance.settings(active);
+      const curator = await getCurator(active);
+      const skillState = curator.snapshot();
+      const canWrite = Boolean(active?.writer);
+      const canManage = Boolean(options.owner ?? active?.owner);
       const runtime = ctx.get('openvikingMemory');
       const agent = sessionId && (ctx.get('agents')?.get(sessionId) ?? agentById.get(sessionId));
       const session = agent?.session;
       const history = governance.history();
       return { status: { state: running ? 'running' : settings.mode === 'off' ? 'disabled' : 'idle', mode: settings.mode,
         sessionId: running?.sessionId ?? selected, lastRun: history[0]?.at }, settings, history,
-      proposals: await governance.proposals(), preservedVersions: await governance.preservedVersions(), ...skillState,
+      proposals: await governance.proposals(active, curator.isArchived), preservedVersions: await governance.preservedVersions(active), ...skillState,
       memory: {
          connection: memoryConnectionStatus(runtime),
          ...(session ? memoryLinkStatus(session, memory.stateOf(session), runtime) : { state: sessionId ? 'unobserved' : 'no_session' }),
        },
       capabilities: { run: settings.mode !== 'off' && Boolean(ctx.get('sessionController')?.resolveAgent || ctx.get('agents') || agentById.size), settings: true, preview: true,
-        approve: governance.canWrite, reject: governance.canWrite, rollback: governance.canWrite, curator: true,
+        approve: canWrite, reject: canWrite, rollback: canWrite, applyDraft: true, curator: true,
         adopt: canManage, archive: canManage, restore: canManage, clearProposals: true, clearHistory: true } };
     } });
   });

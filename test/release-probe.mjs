@@ -118,7 +118,7 @@ export async function apply(ctx) {
           },
         });
         assert.deepEqual(writer.errors, []);
-        assert.deepEqual(writer.writes, ['upload', 'replace']);
+        assert.deepEqual(writer.writes, ['upload', 'replace', 'upload', 'replace']);
         steps.push('public reviewer submission, approval and fixture readback');
         report = { ok: true, steps, name, version, sha256, contentsSha256: installedHash, sessionId, proposalId, pid: process.pid,
           publicReview: { ...publicReview, writes: writer.writes } };

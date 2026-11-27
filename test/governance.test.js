@@ -74,7 +74,8 @@ test('shadow makes no remote calls and auto applies only a current, managed prop
   const options = { directory, owner: 'fixture', targets: [uri], writer, settings: { mode: 'shadow' } };
   const governor = await createGovernance(options);
   const draft = proposal();
-  assert.deepEqual(await governor.submit(draft, { revision: 0 }), { status: 'shadow' });
+  assert.deepEqual(await governor.submit(draft, { revision: 0 }), { status: 'shadow', draftReason: 'draft_mode' });
+  assert.equal((await governor.proposals())[0].draftReason, 'draft_mode');
   assert.equal(reads, 0);
   assert.equal(writes, 0);
   assert.equal((await governor.update({ revision: 0, mode: 'auto' })).status, 'saved');
@@ -135,6 +136,22 @@ test('legacy governance settings gain millisecond defaults and persist custom du
   assert.equal(settings.reviewTimeoutMs, 5000);
   assert.equal(settings.maxTurns, 12);
   assert.equal(settings.cooldownMs, 0);
+});
+
+test('legacy 30 minute cooldown migrates once and can still be explicitly selected', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'skill-governance-cooldown-'));
+  t.after(() => rm(directory, { recursive: true }));
+  const options = { directory, owner: 'fixture' };
+  const path = join(directory, 'governance.json');
+  await writeFile(path, JSON.stringify({ version: 1, owner: 'fixture', revision: 7, runs: [], shadows: [], settings: {
+    mode: 'auto', maxTurns: 10, maxToolCalls: 10, cooldownMs: 1_800_000, maxFailures: 3,
+    correctionWords: ['correction'], provider: '', model: '',
+  } }));
+  const governor = await createGovernance(options);
+  assert.equal(governor.settings().cooldownMs, 900_000);
+  assert.equal((await createGovernance(options)).settings().cooldownMs, 900_000);
+  assert.equal((await governor.update({ revision: 7, cooldownMs: 1_800_000 })).status, 'saved');
+  assert.equal((await createGovernance(options)).settings().cooldownMs, 1_800_000);
 });
 
 test('settings and runtime expose the same review limits and accept the same values', async t => {
@@ -198,4 +215,48 @@ test('reviewer patch writes only the bound body and preserves package metadata a
   assert.equal((await f.service().approve(vote(staged))).status, 'applied');
   assert.deepEqual(f.live().files, { 'refs/data.bin': 'AAEC' });
   assert.deepEqual(f.live().metadata, { source: 'fixture' });
+});
+
+
+test('legacy draft gains an action after verification and keeps its original base', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'skill-governance-draft-'));
+  t.after(() => rm(directory, { recursive: true }));
+  const path = join(directory, 'governance.json');
+  const draft = proposal();
+  let active = { reason: 'draft_identity_unverified' };
+  let live = null;
+  let writes = 0;
+  const adapter = {
+    mode: 'atomic-conditional', read: async () => structuredClone(live),
+    create: async (_, next) => { live = next; writes++; },
+    replace: async () => assert.fail('unexpected replacement'),
+    remove: async () => { live = null; }, verifyIndex: async () => true,
+  };
+  const options = { directory, owner: null, resolveConnection: async () => active };
+  let governor = await createGovernance(options);
+  assert.equal((await governor.submit(draft)).draftReason, 'draft_identity_unverified');
+  const legacy = JSON.parse(await readFile(path, 'utf8'));
+  delete legacy.shadows[0].draftReason;
+  await writeFile(path, JSON.stringify(legacy));
+  governor = await createGovernance(options);
+  const blockedCard = (await governor.proposals(active))[0];
+  assert.equal(blockedCard.draftReason, 'draft_legacy');
+  assert.equal(blockedCard.applyBlockedReason, 'draft_identity_unverified');
+  assert.equal((await governor.applyDraft(draft.proposalId)).status, 'draft_identity_unverified');
+  active = { owner: 'other-user', writer: { adapter }, versions: join(directory, 'other') };
+  assert.equal((await governor.applyDraft(draft.proposalId)).status, 'draft_target_not_owned');
+  active = { owner: 'fixture', writer: { adapter }, versions: join(directory, 'verified') };
+  assert.deepEqual((await governor.proposals(active))[0].actions, ['preview', 'applyDraft']);
+  assert.equal((await governor.applyDraft(draft.proposalId, { isArchived: () => true })).status, 'archived');
+  live = { body: 'An independently created skill.\n', files: {}, metadata: {} };
+  assert.equal((await governor.applyDraft(draft.proposalId)).status, 'conflict');
+  assert.equal((await governor.proposals(active))[0].status, 'shadow');
+  assert.equal(writes, 0);
+  live = null;
+  const results = await Promise.all([governor.applyDraft(draft.proposalId), governor.applyDraft(draft.proposalId)]);
+  assert.deepEqual(results.map(result => result.status), ['applied', 'missing']);
+  assert.match(live.body, /Run validation/);
+  assert.equal(writes, 1);
+  const restarted = await createGovernance(options);
+  assert.equal((await restarted.proposals(active))[0].status, 'applied');
 });
