@@ -24,6 +24,7 @@ function markdownFromArchive(bytes) {
 export async function startWriterFixture() {
   let body = baseline;
   let uploaded;
+  let conflictOnReadback = false;
   const writes = [];
   const errors = [];
   const server = createServer(async (req, res) => {
@@ -37,6 +38,10 @@ export async function startWriterFixture() {
           return json({ initialized: true, user: identity });
         case `GET ${skillPath}`:
           assert.equal(searchParams.get('target_uri'), target);
+          if (conflictOnReadback) {
+            conflictOnReadback = false;
+            return res.writeHead(409).end();
+          }
           return json({ root_uri: root, description, content: body, content_sha256: sha256(body), files: [
             { path: 'SKILL.md', uri, is_dir: false, size: Buffer.byteLength(body), sha256: sha256(body) },
           ] });
@@ -60,6 +65,7 @@ export async function startWriterFixture() {
           body = uploaded;
           uploaded = undefined;
           writes.push('replace');
+          if (writes.length === 2) conflictOnReadback = true;
           return json({});
         }
         case 'POST /api/v1/skills/find':

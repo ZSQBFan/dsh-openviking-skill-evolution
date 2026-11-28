@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
-import { createApprovalService, saveState } from './approval.js';
+import { createApprovalService, needsLegacyCreateVerification, saveState, verificationProgress } from './approval.js';
 import { invalidReviewLimit, REVIEW_DEFAULTS } from './automatic-review.js';
 import { isSkillUri } from './evidence.js';
 import { createOpenVikingAdapter } from './ov-adapter.js';
@@ -98,10 +98,11 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
     if (targetBlock(uri, active)) return null;
     return active.writer.adapter ?? createOpenVikingAdapter({ ...active.writer, managedUri: uri });
   }
+  let wakeVerification = () => {};
   function service(uri, active) {
     const adapter = adapterFor(uri, active);
     if (!adapter) return null;
-    return createApprovalService({ directory: active.versions, managedUri: uri, adapter });
+    return createApprovalService({ directory: active.versions, managedUri: uri, adapter, onVerificationDue: nextAt => wakeVerification(nextAt) });
   }
   async function records(active) {
     if (!active?.writer) return [];
@@ -109,7 +110,56 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
     try { ledger = JSON.parse(await readFile(join(active.versions, 'approvals.json'), 'utf8')); }
     catch (error) { if (error.code === 'ENOENT') return []; throw error; }
     if (ledger.version !== 1 || !Array.isArray(ledger.records)) throw Error('Invalid approval ledger');
-    return ledger.records.filter(record => service(record.proposal.uri, active));
+    return ledger.records.filter(record => !targetBlock(record.proposal.uri, active));
+  }
+  async function verifyDue(signal, onVerified) {
+    signal?.throwIfAborted();
+    const active = await connection();
+    if (!active?.writer || active.current?.() === false) return Infinity;
+    const due = (await records(active)).filter(record => needsLegacyCreateVerification(record) ||
+      (verificationProgress(record)?.nextAt ?? Infinity) <= Date.now());
+    for (const { proposal } of due) {
+      signal?.throwIfAborted();
+      if (active.current?.() === false) return Infinity;
+      const result = await service(proposal.uri, active).verify({ id: proposal.proposalId, automatic: true,
+        signal, isCurrent: active.current });
+      if (result.status === 'applied' && active.current?.() !== false && !signal?.aborted) {
+        await onVerified?.(proposal, active);
+      }
+    }
+    return (await records(active)).reduce((next, record) =>
+      Math.min(next, verificationProgress(record)?.nextAt ?? Infinity), Infinity);
+  }
+  function startVerification({ signal, onVerified, onError } = {}) {
+    let timer, scheduledAt = Infinity, running = false, stopped = false, pendingAt = Infinity;
+    function schedule(at) {
+      if (stopped || signal?.aborted) return;
+      if (running) { pendingAt = Math.min(pendingAt, at); return; }
+      if (at >= scheduledAt) return;
+      clearTimeout(timer);
+      scheduledAt = at;
+      timer = setTimeout(tick, Math.max(0, at - Date.now()));
+      timer.unref?.();
+    }
+    async function tick() {
+      if (stopped || signal?.aborted) return;
+      scheduledAt = Infinity;
+      running = true;
+      let next = Infinity;
+      try {
+        next = await verifyDue(signal, onVerified);
+      } catch (error) {
+        if (!signal?.aborted) onError?.(error);
+      } finally {
+        running = false;
+        const wakeAt = Math.min(next, pendingAt, Date.now() + 15_000);
+        pendingAt = Infinity;
+        schedule(Math.max(Date.now() + 100, wakeAt));
+      }
+    }
+    wakeVerification = schedule;
+    schedule(Date.now());
+    return () => { stopped = true; clearTimeout(timer); };
   }
   function approvalResult({ status, errorCode, diagnostic }) {
     return { status, ...(diagnostic && { errorCode, diagnostic }) };
@@ -153,6 +203,7 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
       });
     },
     submit,
+    startVerification,
     async inspect(uri, signal) {
       if (snapshotSettings().mode === 'off') return { status: 'disabled' };
       const adapter = adapterFor(uri, await connection());
@@ -209,16 +260,18 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
       const shadows = state.shadows.filter(item => !official.has(item.proposalId)).map(proposal => ({ status: 'shadow', proposal }));
       const creationTime = value => Number.isFinite(Date.parse(value)) ? Date.parse(value) : Number.MIN_SAFE_INTEGER;
       return [...all, ...shadows].filter(({ proposal }) => !hidden.has(proposal.proposalId)).reverse()
-        .map(({ status, proposal, history }) => {
+        .map(record => {
+          const { status, proposal, history } = record;
+          const verification = verificationProgress(record);
           const draft = status === 'shadow';
           const blocked = draft && (disabled ? 'draft_reviews_disabled' : targetBlock(proposal.uri, active) ??
             (isArchived(proposal.uri) ? 'archived' : undefined));
           return { id: proposal.proposalId, uri: proposal.uri, status, summary: proposal.reason,
-            sessionId: proposal.evidence.sessionId, action: proposal.action, history,
+            sessionId: proposal.evidence.sessionId, action: proposal.action, history, ...(verification && { verification }),
             createdAt: history?.[0]?.at ?? proposal.createdAt ?? legacyTimes.get(proposal.proposalId),
             ...(draft && { draftReason: proposal.draftReason ?? 'draft_legacy', ...(blocked && { applyBlockedReason: blocked }) }),
             actions: ['preview', ...(draft && !blocked ? ['applyDraft'] : []), ...(status === 'pending' ? ['approve', 'reject'] : []),
-              ...(status === 'applied' || status === 'restoring' ? ['rollback'] : []), ...(status === 'applying' ? ['approve'] : [])] };
+              ...(status === 'applied' ? ['rollback'] : []), ...(['applying', 'restoring'].includes(status) ? ['verifyWrite'] : [])] };
         })
         .sort((left, right) => creationTime(right.createdAt) - creationTime(left.createdAt));
     },
@@ -226,12 +279,13 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
       const recoverable = new Set(['applied', 'applying', 'restoring', 'write_unconfirmed', 'index_unconfirmed', 'rollback_conflict']);
       const hidden = new Set(state.hiddenProposalIds ?? []);
       return (await records(active)).filter(record => recoverable.has(record.status) && hidden.has(record.proposal.proposalId)).map(record => {
-        const { proposal } = record;
+        const { proposal, history } = record;
+        const verification = verificationProgress(record);
         return { id: proposal.proposalId, uri: proposal.uri, status: record.status, summary: proposal.reason,
-          sessionId: proposal.evidence.sessionId, action: proposal.action,
+          sessionId: proposal.evidence.sessionId, action: proposal.action, history, ...(verification && { verification }),
           createdAt: record.history?.[0]?.at ?? proposal.createdAt,
-          actions: ['preview', ...(record.status === 'applying' ? ['approve'] : []),
-            ...(record.status === 'applied' || record.status === 'restoring' ? ['rollback'] : [])] };
+          actions: ['preview', ...(['applying', 'restoring'].includes(record.status) ? ['verifyWrite'] : []),
+            ...(record.status === 'applied' ? ['rollback'] : [])] };
       });
     },
     async preview(id) {
@@ -239,6 +293,15 @@ export async function createGovernance({ directory, owner, writer, resolveConnec
       const proposal = (await records(await connection())).find(record => record.proposal.proposalId === id)?.proposal ??
         state.shadows.find(item => item.proposalId === id);
       return proposal ? { diff: proposal.diff ?? null, operations: proposal.operations ?? [], evidence: proposal.evidence } : { status: 'missing' };
+    },
+    async verifyWrite(id, signal) {
+      if (typeof id !== 'string' || !HEX.test(id)) return { status: 'invalid_id' };
+      const active = await connection();
+      const record = (await records(active)).find(item => item.proposal.proposalId === id);
+      if (!record) return { status: 'missing' };
+      const target = service(record.proposal.uri, active);
+      const result = await target.verify({ id, signal, isCurrent: active.current });
+      return { ...approvalResult(result), uri: record.proposal.uri, action: record.proposal.action };
     },
     async vote(action, id, signal) {
       if (!HEX.test(id) || !['approve', 'reject', 'rollback'].includes(action)) return { status: 'invalid_operation' };

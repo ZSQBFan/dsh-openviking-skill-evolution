@@ -299,7 +299,12 @@ export async function mountEvolution(ctx, options, evidence) {
   ctx.effect(() => {
     const interval = setInterval(() => background(async () => (await getCurator(await governance.connection())).scan()), 60_000);
     interval.unref?.();
-    return () => { scope.abort(); clearInterval(interval); for (const timer of timers) clearTimeout(timer); };
+    const stopVerification = governance.startVerification({ signal: scope.signal,
+      onVerified: async (proposal, active) => {
+        if (proposal.action === 'create') await (await getCurator(active)).adopt(proposal.uri, 'created_by_review');
+      },
+    });
+    return () => { scope.abort(); stopVerification(); clearInterval(interval); for (const timer of timers) clearTimeout(timer); };
   }, 'skill-evolution-runtime');
 
   async function submitProposal(proposal, config, signal, source) {
@@ -367,6 +372,11 @@ export async function mountEvolution(ctx, options, evidence) {
     },
     settings: input => governance.update(input),
     preview: input => governance.preview(input.id),
+    async verifyWrite(input, { signal }) {
+      const result = await governance.verifyWrite(input.id, signal);
+      if (result.status === 'applied' && result.action === 'create') await (await getCurator(await governance.connection())).adopt(result.uri, 'created_by_review');
+      return result;
+    },
     async applyDraft(input, { signal }) {
       const isArchived = async (uri, active) => (await getCurator(active)).isArchived(uri);
       const result = await governance.applyDraft(input.id, { signal, isArchived });
@@ -405,7 +415,7 @@ export async function mountEvolution(ctx, options, evidence) {
          ...(session ? memoryLinkStatus(session, memory.stateOf(session), runtime) : { state: sessionId ? 'unobserved' : 'no_session' }),
        },
       capabilities: { run: settings.mode !== 'off' && Boolean(ctx.get('sessionController')?.resolveAgent || ctx.get('agents') || agentById.size), settings: true, preview: true,
-        approve: canWrite, reject: canWrite, rollback: canWrite, applyDraft: true, curator: true,
+        approve: canWrite, reject: canWrite, rollback: canWrite, verifyWrite: canWrite, applyDraft: true, curator: true,
         adopt: canManage, archive: canManage, restore: canManage, clearProposals: true, clearHistory: true } };
     } });
   });

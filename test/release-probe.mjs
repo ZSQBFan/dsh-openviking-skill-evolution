@@ -106,7 +106,7 @@ export async function apply(ctx) {
         await ctx.sessions.flush(session);
         steps.push('skill-refine patch preview and deduplication');
         const publicReview = await verifyPublicReview({
-          request, observed: approvals, liveBody: writer.liveBody,
+          request, observed: approvals, liveBody: writer.liveBody, readbackConflict: true,
           async session(label, body, replacement) {
             const id = `release-review-${label}`;
             const { agent } = await ctx.agents.create({ sessionId: id, meta: { cwd: process.cwd() } });

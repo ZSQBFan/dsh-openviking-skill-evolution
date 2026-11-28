@@ -19,6 +19,18 @@ function sameDirectories(left, right) {
   return JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
 }
 
+function storedDescription(value) {
+  if (value.startsWith('"')) return JSON.parse(value);
+  if (/^'(?:[^'\n]|'')*'$/.test(value)) return value.slice(1, -1).replaceAll("''", "'");
+  // OpenViking wraps long plain YAML scalars with indented continuation lines.
+  // Fold those lines only, without accepting new fields, blocks or comments.
+  const lines = value.split('\n');
+  if (/^[-?:](?: |$)|^[!&*#|>\[\]{},%@`"']/.test(lines[0]) ||
+      lines.slice(1).some(line => !/^ +[^\s]/.test(line)) ||
+      lines.some(line => /\t|(?:^| )#|:(?: |$)| $/.test(line))) return undefined;
+  return lines.map(line => line.trimStart()).join(' ');
+}
+
 export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nativeHeaders = {} }) {
   const base = new URL(origin);
   const loopback = base.protocol === 'http:' && base.hostname === '127.0.0.1' && Boolean(base.port);
@@ -137,16 +149,13 @@ export function createOpenVikingAdapter({ origin, managedUri, mode, apiKey, nati
           source?.type !== 'skill_evolution' ||
           source.skill_name !== skill || source.tracked !== true || source.metadata_uri !== `${packageUri}/.source.json` ||
           Object.keys(source).length !== 4) return false;
-      const parse = body => /^---\nname: ([a-z0-9_-]+)\ndescription: ([^\n]+)\n---\n([\s\S]*)$/.exec(body);
+      const parse = body => /^---\nname: ([a-z0-9_-]+)\ndescription: ([^\n]+(?:\n +[^\n]+)*)\n---\n([\s\S]*)$/.exec(body);
       const proposed = parse(expected.body);
       const stored = parse(live.body);
       if (!proposed || !stored || proposed[1] !== skill || stored[1] !== skill || proposed[3].trimEnd() !== stored[3]) return false;
       try {
         const description = JSON.parse(proposed[2]);
-        const value = stored[2];
-        return value.startsWith('"') ? description === JSON.parse(value)
-          : value.startsWith("'") && value.endsWith("'") ? description === value.slice(1, -1).replaceAll("''", "'")
-          : description === value;
+        return typeof description === 'string' && description === storedDescription(stored[2]);
       } catch { return false; }
     },
     async create(uri, next, _previous, signal) {

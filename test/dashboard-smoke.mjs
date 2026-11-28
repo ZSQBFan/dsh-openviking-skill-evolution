@@ -83,7 +83,7 @@ export async function apply(ctx) {
       { id: 'fixture-p3', status: 'shadow', draftReason: 'draft_target_not_owned', applyBlockedReason: 'draft_reviews_disabled', actions: ['preview'] },
       { id: 'fixture-p4', status: 'shadow', draftReason: 'draft_legacy', actions: ['preview'] },
       { id: 'fixture-p5', status: 'shadow' },
-      { id: 'fixture-old-write', status: 'applying', actions: ['preview', 'approve'], history: [{ status: 'write_unconfirmed' }] }],
+      { id: 'fixture-old-write', status: 'applying', actions: ['preview', 'verifyWrite'], history: [{ status: 'write_unconfirmed' }] }],
     preservedVersions: [],
     usage: { skills: [{ uri, loads: 2, lastUsed: Date.parse(${JSON.stringify(fixtureTime)}) }] },
     curator: { skills: [], nextScan: Date.parse(${JSON.stringify(fixtureTime)}), audit: [{ at: Date.parse(${JSON.stringify(fixtureTime)}), status: 'ready' }] },
@@ -93,7 +93,6 @@ export async function apply(ctx) {
   };
   const result = status => ({ status });
   let draftAttempts = 0;
-  let approvalAttempts = 0;
   const actions = {
     run: ({ sessionId }) => {
       if (sessionId === 'fixture-batch') {
@@ -104,8 +103,11 @@ export async function apply(ctx) {
           { id: 'batch-error', status: 'pending', actions: ['preview', 'approve'] },
           { id: 'batch-old-draft', status: 'shadow', actions: ['preview', 'applyDraft'] },
           { id: 'batch-needs-check', status: 'pending', actions: ['preview', 'approve'] },
-          { id: 'batch-old-write', status: 'applying', actions: ['preview', 'approve'] },
+          { id: 'batch-old-write', status: 'applying', actions: ['preview', 'verifyWrite'],
+             history: [{ status: 'write_unconfirmed' }] },
         ];
+        state.preservedVersions = [{ id: 'batch-hidden-restore', status: 'restoring', actions: ['preview', 'verifyWrite'],
+          verification: { attempts: 1, maxAttempts: 4, nextAt: Date.now() + 120_000 } }];
       }
       const run = sessionId === 'fixture-timeout'
         ? { id: sessionId, at: ${JSON.stringify(fixtureTime)}, status: 'timed_out', stage: 'stream', errorCode: 'TimeoutError', reason: 'timeout fixture', retryAt: ${JSON.stringify(fixtureTime)} }
@@ -124,20 +126,26 @@ export async function apply(ctx) {
         const proposal = state.proposals.find(item => item.id === id && item.status === 'pending');
         if (!proposal || id === 'batch-error') throw Error('fixture operation failed');
         if (id === 'batch-needs-check') {
-          Object.assign(proposal, { status: 'applying', history: [{ status: 'write_unconfirmed' }] });
+          Object.assign(proposal, { status: 'applying', actions: ['preview', 'verifyWrite'], history: [{ status: 'write_unconfirmed' }] });
           return result('write_unconfirmed');
         }
         Object.assign(proposal, { status: 'applied', actions: ['preview', 'rollback'] });
         return result('applied');
       }
-      if (approvalAttempts++ === 0) {
-        Object.assign(state.proposals[0], { status: 'applying',
-          history: [{ status: 'applying' }, { status: 'write_unconfirmed' }] });
-        return result('write_unconfirmed');
-      }
-      Object.assign(state.proposals[0], { status: 'applied', actions: ['preview', 'rollback'],
-        history: [{ status: 'index_unconfirmed' }, { status: 'applied' }] });
-      return result('applied');
+      if (id !== 'fixture-proposal' || state.proposals[0].status !== 'pending') throw Error('unexpected duplicate approval');
+      Object.assign(state.proposals[0], { status: 'applying', actions: ['preview', 'verifyWrite'],
+        history: [{ status: 'applying' }, { status: 'write_unconfirmed' }] });
+      return result('write_unconfirmed');
+    },
+    verifyWrite: ({ id }) => {
+      const proposal = [...state.proposals, ...state.preservedVersions].find(item => item.id === id);
+      if (!proposal?.actions.includes('verifyWrite')) throw Error('unexpected verification target');
+      if (id === 'batch-old-write') return result('write_unconfirmed');
+      const restoring = proposal.status === 'restoring';
+      const status = restoring ? 'rolled_back' : 'applied';
+      Object.assign(proposal, { status, actions: restoring ? ['preview'] : ['preview', 'rollback'],
+        history: [{ status: 'index_unconfirmed' }, { status }] });
+      return result(status);
     },
     applyDraft: input => {
       if (input.id === 'batch-conflict') return result('conflict');
@@ -158,7 +166,7 @@ export async function apply(ctx) {
     reject: () => { throw Error('disabled action dispatched'); },
     clearProposals: ({ confirm }) => {
       if (confirm !== true) throw Error('missing clear confirmation');
-      state.preservedVersions = state.proposals.filter(item => item.status === 'rolled_back');
+      state.preservedVersions = state.proposals.filter(item => item.status === 'rolled_back' || item.actions?.includes('verifyWrite'));
       return { status: 'proposals_cleared', count: state.proposals.splice(0).length };
     },
     clearHistory: ({ confirm }) => {
@@ -166,9 +174,21 @@ export async function apply(ctx) {
       return { status: 'history_cleared', count: state.history.splice(0).length };
     },
     curator: () => { state.curator.status = 'ready'; return result('ready'); },
-    adopt: input => { state.curator.skills = [{ uri: input.uri, status: 'active' }]; return result('active'); },
-    archive: () => { state.curator.skills[0].status = 'archived'; return result('archived'); },
-    restore: () => { state.curator.skills[0].status = 'active'; return result('active'); },
+    adopt: input => {
+      state.curator.skills = [{ uri: input.uri, status: 'active', actions: ['archive'] },
+        { uri: 'viking://user/fixture/skills/unavailable-skill/SKILL.md', status: 'active', actions: ['archive'] }];
+      return 'active';
+    },
+    archive: input => {
+      if (input.uri !== state.curator.skills[0].uri) return 'out_of_scope';
+      Object.assign(state.curator.skills[0], { status: 'archived', actions: ['restore'] });
+      return 'archived';
+    },
+    restore: input => {
+      if (input.uri !== state.curator.skills[0].uri) return 'out_of_scope';
+      Object.assign(state.curator.skills[0], { status: 'active', actions: ['archive'] });
+      return 'active';
+    },
   };
   state.capabilities = Object.fromEntries(Object.keys(actions).map(key => [key, key !== 'reject']));
   mountDashboard(ctx, { snapshot: ({ sessionId } = {}) => ({
@@ -421,11 +441,12 @@ try {
   await inPanel('取消');
   await inPanel('批准');
   const skillRow = `[...${latestRows('proposals')}.querySelectorAll('li')].find(row => row.querySelector('strong')?.textContent === ${JSON.stringify(uri)})`;
-  async function confirmAndCheckApproval(progressStatus, expectedStatus) {
+  async function confirmAndCheckApproval(progressStatus, expectedStatus, action) {
     await cdp('Fetch.enable', { patterns: [{ urlPattern: origin + path + '*', requestStage: 'Request' }] });
     try {
       const [approval] = await Promise.all([nextEvent('Fetch.requestPaused'), inPanel('确认')]);
       assert.equal(approval.request.method, 'POST');
+      assert.deepEqual(JSON.parse(approval.request.postData), { action, input: { id: 'fixture-proposal' } });
       await retry(() => evaluate(`${processed}?.querySelector('summary').innerText.includes(${JSON.stringify(progressStatus)})`), 'live approval progress before POST');
       assert.equal(await evaluate(`${processed}.open`), false);
       assert.equal(await evaluate(`document.activeElement === ${processed}.querySelector('summary')`), true);
@@ -442,12 +463,12 @@ try {
     assert.match(await evaluate(`${processed}.querySelector('summary').innerText`), new RegExp(expectedStatus));
     await evaluate(`${processed}.querySelector('summary').click()`);
   }
-  await confirmAndCheckApproval('应用中', '写入待核验');
+  await confirmAndCheckApproval('应用中', '写入待核验', 'approve');
   assert.match(await evaluate(`${skillRow}.innerText`), /写入待核验/);
   assert.match(await evaluate(`${proposalRow('fixture-old-write')}.innerText`), /写入待核验|核验写入/);
   await press('核验写入', skillRow);
   await text('核验上一次写入的结果？');
-  await confirmAndCheckApproval('核验中', '已应用');
+  await confirmAndCheckApproval('核验中', '已应用', 'verifyWrite');
   await text('技能版本已核验，搜索索引尚未确认。');
   await press('回滚', skillRow);
   await inPanel('确认');
@@ -485,11 +506,65 @@ try {
   await inPanel('运行治理');
   await fill('私有技能 URI', uri);
   await inPanel('纳管');
-  await inPanel('归档');
-  await inPanel('确认');
-  await inPanel('恢复');
-  await inPanel('确认');
-  await text('活跃');
+  const managed = `${panel}.querySelector('details[data-ove-managed-skills]')`;
+  await retry(() => evaluate(`!${panel}.querySelector('header button').disabled`), 'managed skills loaded');
+  const initiallyCollapsed = await evaluate(`${managed}?.open === false`);
+  if (initiallyCollapsed) {
+    await text('已纳管技能 (2)');
+    assert.equal(await evaluate(`${managed}.querySelector('li').getClientRects().length`), 0);
+    await evaluate(`${managed}.querySelector('summary').focus()`);
+    await enter();
+  }
+  const curatorCard = `([...${panel}.querySelectorAll('h2')].find(heading => heading.textContent === '技能治理').closest('section'))`;
+  const managedRow = name => `([...${curatorCard}.querySelectorAll('li')].find(row => row.querySelector('strong')?.textContent === ${JSON.stringify(name)}))`;
+  const currentSkill = managedRow(uri);
+  const focusSkillButton = label => evaluate(`([...${currentSkill}.querySelectorAll('button')].find(button => button.textContent === ${JSON.stringify(label)})).focus()`);
+  const activeLabel = () => evaluate('document.activeElement.textContent');
+  await focusSkillButton('归档');
+  await enter();
+  await retry(() => evaluate(`${currentSkill}?.innerText.includes('归档这项技能？')`), 'archive confirmation beside the skill');
+  assert(initiallyCollapsed, 'managed skills default to collapsed');
+  assert.equal(await activeLabel(), '取消');
+  await enter();
+  assert.equal(await activeLabel(), '归档', 'cancelling returns focus to the originating action');
+  assert.equal(await evaluate(`${currentSkill}.querySelector('.ove-status').textContent`), '活跃');
+  await enter();
+  await cdp('Fetch.enable', { patterns: [{ urlPattern: origin + path + '*', requestStage: 'Request' }] });
+  try {
+    await focusSkillButton('确认');
+    const [write] = await Promise.all([nextEvent('Fetch.requestPaused'), enter()]);
+    assert.equal(write.request.method, 'POST');
+    assert.deepEqual(JSON.parse(write.request.postData), { action: 'archive', input: { uri } });
+    await retry(() => evaluate(`${currentSkill}?.querySelector('[role="status"]')?.innerText === '正在归档…'`), 'archive feedback before POST');
+    assert.equal(await evaluate(`document.activeElement === ${currentSkill}`), true, 'pending archive keeps focus on the skill row');
+    await evaluate(`${managed}.querySelector('summary').focus()`);
+    await enter();
+    await retry(() => evaluate(`!${managed}.open && ${curatorCard}.innerText.includes('正在归档…')`), 'collapsed list still shows progress');
+    const [snapshot] = await Promise.all([nextEvent('Fetch.requestPaused'), cdp('Fetch.continueRequest', { requestId: write.requestId })]);
+    assert.equal(snapshot.request.method, 'GET');
+    await retry(() => evaluate(`!${managed}.open && ${curatorCard}.innerText.includes('技能已归档。')`), 'collapsed list shows the archive result before refresh');
+    await cdp('Fetch.continueRequest', { requestId: snapshot.requestId });
+    await retry(() => evaluate(`${currentSkill}.querySelector('button:enabled')?.textContent === '恢复'`), 'archive refresh finished');
+    assert.equal(await evaluate(`document.activeElement === ${managed}.querySelector('summary')`), true);
+    await enter();
+    assert.equal(await evaluate(`${currentSkill}.querySelector('.ove-status').textContent`), '已归档');
+  } finally {
+    await cdp('Fetch.disable');
+  }
+  await focusSkillButton('恢复');
+  await enter();
+  await focusSkillButton('确认');
+  await enter();
+  await retry(() => evaluate(`${currentSkill}?.querySelector('.ove-status')?.textContent === '活跃' && ${currentSkill}.innerText.includes('技能已恢复。')`), 'restore confirmation and status');
+  await retry(async () => (await activeLabel()) === '归档', 'completed restore focuses the new archive action');
+  const unavailableSkill = managedRow('viking://user/fixture/skills/unavailable-skill/SKILL.md');
+  await press('归档', unavailableSkill);
+  await press('确认', unavailableSkill);
+  await retry(() => evaluate(`${unavailableSkill}?.querySelector('[role="alert"]')?.innerText.includes('此技能已不在当前纳管范围内')`), 'archive failure beside the skill');
+  assert.equal(await evaluate(`${unavailableSkill}.querySelector('.ove-status').textContent`), '活跃');
+  assert.equal(await evaluate(`${managed}.open`), true);
+  await evaluate(`${managed}.querySelector('summary').click()`);
+  assert.equal(await evaluate(`${managed}.open`), false);
   assert.equal(await evaluate(`${panel}.querySelector('select').value`), 'shadow');
   const persisted = await (await fetch(origin + path, { headers: { Cookie: cookie } })).json();
   assert.deepEqual(persisted.data.settings, {
@@ -513,6 +588,20 @@ try {
   assert.equal(await evaluate(`${versions}.open`), false);
   await evaluate(`${versions}.querySelector('summary').click()`);
   await text('已回滚');
+  const clearedSnapshot = (await (await fetch(origin + path, { headers: { Cookie: cookie } })).json()).data;
+  assert.deepEqual(clearedSnapshot.proposals, []);
+  assert.deepEqual(clearedSnapshot.preservedVersions.filter(item => item.actions.includes('verifyWrite')).map(item => item.id), ['fixture-old-write']);
+  assert.match(await evaluate(`${versions}.querySelector('summary').innerText`), /待核验 \(1\)/);
+  await evaluate(`${versions}.querySelector('summary').click()`);
+  const proposalControls = () => evaluate(`[...${panel}.querySelectorAll('button')].map(b => b.textContent.trim()).filter(label => ['一键核验写入', '一键批准所有提案', '清空提案'].includes(label))`);
+  assert.deepEqual(await proposalControls(), ['一键核验写入'], 'Only batch verification remains when all visible proposals were cleared');
+  await inPanel('一键核验写入');
+  await text('已核验 1 项');
+  await retry(() => evaluate(`!${panel}.querySelector('header button').disabled`), 'preserved-only verification dashboard refreshed');
+  const recoveredSnapshot = (await (await fetch(origin + path, { headers: { Cookie: cookie } })).json()).data;
+  assert.deepEqual(recoveredSnapshot.proposals, []);
+  assert.equal(recoveredSnapshot.preservedVersions.find(item => item.id === 'fixture-old-write').status, 'applied');
+  assert.deepEqual(await proposalControls(), []);
   await fill('会话 ID', 'fixture-batch');
   await inPanel('运行复盘');
   await text('batch-applied');
@@ -556,6 +645,35 @@ try {
   assert.deepEqual(perItem.map(item => item.split(' · ')[0]), batchRequests.map(([, id]) => id));
   assert.match(perItem[1], /目标技能已变更/);
   assert.match(perItem[4], /写入待核验/);
+  if (!await evaluate(`${versions}.open`)) await evaluate(`${versions}.querySelector('summary').click()`);
+  await text('正在自动核验');
+  await evaluate(`${versions}.querySelector('summary').click()`);
+  assert.equal(await evaluate(`${versions}.open`), false);
+  const writeVerificationTargets = ['batch-needs-check', 'batch-old-write', 'batch-hidden-restore'];
+  await cdp('Fetch.enable', { patterns: [{ urlPattern: origin + path + '*', requestStage: 'Request' }] });
+  try {
+    let [paused] = await Promise.all([nextEvent('Fetch.requestPaused'), inPanel('一键核验写入')]);
+    const verifiedIds = [];
+    for (const _ of writeVerificationTargets) {
+      assert.equal(paused.request.method, 'POST');
+      const body = JSON.parse(paused.request.postData);
+      assert.deepEqual(body, { action: 'verifyWrite', input: { id: body.input.id } });
+      verifiedIds.push(body.input.id);
+      [paused] = await Promise.all([nextEvent('Fetch.requestPaused'), cdp('Fetch.continueRequest', { requestId: paused.requestId })]);
+    }
+    assert.deepEqual(verifiedIds.sort(), writeVerificationTargets.sort());
+    assert.equal(paused.request.method, 'GET');
+    await cdp('Fetch.continueRequest', { requestId: paused.requestId });
+  } finally {
+    await cdp('Fetch.disable');
+  }
+  await retry(() => evaluate(`!${panel}.querySelector('header button').disabled`), 'verification dashboard refreshed');
+  await text('已核验 2 项');
+  const verified = (await (await fetch(origin + path, { headers: { Cookie: cookie } })).json()).data;
+  assert.equal(verified.proposals.find(item => item.id === 'batch-needs-check').status, 'applied');
+  assert.equal(verified.proposals.find(item => item.id === 'batch-old-write').status, 'applying');
+  assert.equal(verified.proposals.find(item => item.id === 'batch-error').status, 'pending');
+  assert.equal(verified.preservedVersions.find(item => item.id === 'batch-hidden-restore').status, 'rolled_back');
   assert.deepEqual(exceptions, []);
   console.log('Native React Settings exercised selective batch approval and live results, draft reasons and one-click apply, review, history, approval and rollback, thresholds, curator, usage, memory and both clear actions.');
 } catch (error) {

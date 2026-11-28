@@ -5,11 +5,14 @@ window.__ModuleLoader__.load({
     const { createElement: h, useEffect, useRef, useState } = React;
     const ns = 'dsh-openviking-skill-evolution';
     const endpoint = `api/${ns}/dashboard`;
-    const proposalActions = ['preview', 'approve', 'reject', 'rollback'];
+    const proposalActions = ['preview', 'verifyWrite', 'approve', 'reject', 'rollback'];
     const approvalStates = new Set(['pending', 'applying', 'applied', 'write_unconfirmed', 'index_unconfirmed', 'rejected', 'rolled_back', 'restoring']);
     const unconfirmedStates = new Set(['write_unconfirmed', 'index_unconfirmed']);
     const proposalStatus = item => ['applying', 'restoring'].includes(item.status) && unconfirmedStates.has(rows(item.history).at(-1)?.status)
       ? item.history.at(-1).status : item.status;
+    const canVerifyWrite = item => Array.isArray(item?.actions) && item.actions.includes('verifyWrite');
+    const autoVerificationActive = item => canVerifyWrite(item) && Number.isFinite(item?.verification?.nextAt);
+    const displayedProposalStatus = item => autoVerificationActive(item) ? 'autoVerifying' : proposalStatus(item);
     const draftReasons = new Set([
       'draft_mode', 'draft_connection_unavailable', 'draft_identity_unverified',
       'draft_target_not_owned', 'draft_target_unmanaged', 'draft_legacy',
@@ -22,7 +25,11 @@ window.__ModuleLoader__.load({
       missing: 'draftApplyMissing', cancelled: 'draftApplyCancelled', unresolved_write: 'draftApplyUnresolved',
       write_unconfirmed: 'draftApplyWriteUnconfirmed', index_unconfirmed: 'indexUnconfirmed',
     }));
-    const skillActions = ['adopt', 'archive', 'restore'];
+    const skillActions = ['archive', 'restore'];
+    const skillTransitions = {
+      archive: { status: 'archived', nextAction: 'restore', progress: 'skillArchiving', success: 'skillArchived' },
+      restore: { status: 'active', nextAction: 'archive', progress: 'skillRestoring', success: 'skillRestored' },
+    };
     const numericFields = {
       maxTurns: { scale: 1, min: 1, max: 1000 },
       maxToolCalls: { scale: 1, min: 1, max: 1000 },
@@ -40,9 +47,9 @@ window.__ModuleLoader__.load({
         durationMinutes: 'Review trigger duration (minutes)', reviewTimeoutSeconds: 'Model review timeout (seconds)',
         reviewProvider: 'Review provider ID', reviewModel: 'Review model ID', usingSessionModel: 'Reviews use the source session’s model when either ID is blank.',
         older: 'Older entries', processedProposals: 'Processed proposals', verifyWrite: 'Verify write',
-        needsVerification: 'Awaiting verification', verifying_write: 'Verifying write',
-        approveAll: 'Approve all proposals', batchProcessed: 'Processed {done} / {total}',
-        batchApplied: '{count} applied', batchVerify: '{count} awaiting verification', batchOther: '{count} not confirmed as applied',
+        needsVerification: 'Awaiting verification', verifying_write: 'Verifying write', autoVerifying: 'Automatically verifying',
+        approveAll: 'Approve all proposals', verifyAll: 'Verify writes', batchProcessed: 'Processed {done} / {total}',
+        batchApplied: '{count} applied', batchVerified: '{count} verified', batchVerify: '{count} awaiting verification', batchOther: '{count} not confirmed as applied',
         batchDetails: 'Results by proposal',
         write_unconfirmed: 'Write unconfirmed', index_unconfirmed: 'Index unconfirmed', createdAt: 'Created', startedAt: 'Started', finishedAt: 'Finished', retryAt: 'Retry after', stage: 'Stage', errorCode: 'Error code',
         timed_out: 'Review timed out', review_source_busy: 'The source session is still running.',
@@ -65,7 +72,9 @@ window.__ModuleLoader__.load({
         no_evidence: 'This conversation has no reviewable activity yet.', deduped: 'This conversation has already been reviewed. There is no new activity.',
         busy: 'A review is already running. Try again after it finishes.', settings: 'Save settings', preview: 'Preview',
         approve: 'Approve', reject: 'Reject', rollback: 'Rollback', curator: 'Run curator',
-        adopt: 'Adopt', archive: 'Archive', restore: 'Restore', uri: 'Private skill URI',
+        adopt: 'Adopt', archive: 'Archive', restore: 'Restore', uri: 'Private skill URI', managedSkills: 'Managed skills',
+        skillArchiving: 'Archiving…', skillRestoring: 'Restoring…', skillArchived: 'Skill archived.', skillRestored: 'Skill restored.',
+        skillOutOfScope: 'This skill is no longer managed by the current profile.',
         confirm: 'Confirm', cancel: 'Cancel', close: 'Close',
         confirmApprove: 'Apply this proposal to the skill?', confirmVerifyWrite: 'Verify the result of the previous write?', confirmReject: 'Reject this proposal?',
         confirmRollback: 'Restore the version saved before this proposal was applied?',
@@ -123,9 +132,9 @@ window.__ModuleLoader__.load({
         durationMinutes: '复盘触发时长（分钟）', reviewTimeoutSeconds: '模型复盘超时（秒）',
         reviewProvider: '复盘提供商 ID', reviewModel: '复盘模型 ID', usingSessionModel: '未完整设置复盘模型，当前使用来源会话的模型。',
         older: '较早的记录', processedProposals: '已处理的提案', verifyWrite: '核验写入',
-        needsVerification: '待核验', verifying_write: '核验中',
-        approveAll: '一键批准所有提案', batchProcessed: '已处理 {done} / {total} 项',
-        batchApplied: '已应用 {count} 项', batchVerify: '待核验 {count} 项', batchOther: '未确认应用 {count} 项',
+        needsVerification: '待核验', verifying_write: '核验中', autoVerifying: '正在自动核验',
+        approveAll: '一键批准所有提案', verifyAll: '一键核验写入', batchProcessed: '已处理 {done} / {total} 项',
+        batchApplied: '已应用 {count} 项', batchVerified: '已核验 {count} 项', batchVerify: '待核验 {count} 项', batchOther: '未确认应用 {count} 项',
         batchDetails: '查看每项结果',
         write_unconfirmed: '写入待核验', index_unconfirmed: '索引待核验', createdAt: '创建时间', startedAt: '开始时间', finishedAt: '完成时间', retryAt: '最早重试时间', stage: '阶段', errorCode: '错误代码',
         timed_out: '复盘超时', review_source_busy: '来源会话仍在运行。',
@@ -148,7 +157,9 @@ window.__ModuleLoader__.load({
         no_evidence: '这个会话暂时没有可复盘的活动。', deduped: '这个会话已复盘，暂无新活动。',
         busy: '已有复盘正在运行，请在完成后重试。', settings: '保存设置', preview: '预览',
         approve: '批准', reject: '驳回', rollback: '回滚', curator: '运行治理',
-        adopt: '纳管', archive: '归档', restore: '恢复', uri: '私有技能 URI',
+        adopt: '纳管', archive: '归档', restore: '恢复', uri: '私有技能 URI', managedSkills: '已纳管技能',
+        skillArchiving: '正在归档…', skillRestoring: '正在恢复…', skillArchived: '技能已归档。', skillRestored: '技能已恢复。',
+        skillOutOfScope: '此技能已不在当前纳管范围内。',
         confirm: '确认', cancel: '取消', close: '关闭',
         confirmApprove: '将此提案应用到技能？', confirmVerifyWrite: '核验上一次写入的结果？', confirmReject: '驳回这项提案？',
         confirmRollback: '恢复此提案应用前保存的版本？', confirmArchive: '归档这项技能？', confirmRestore: '恢复这项技能？',
@@ -365,6 +376,8 @@ window.__ModuleLoader__.load({
       const currentSession = useRef(currentSessionId);
       currentSession.current = currentSessionId;
       const [data, setData] = useState(null);
+      const latestData = useRef(null);
+      latestData.current = data;
       const [error, setError] = useState('');
       const [notice, setNotice] = useState(null);
       const [busy, setBusy] = useState('');
@@ -378,6 +391,9 @@ window.__ModuleLoader__.load({
       const [lastApprovalId, setLastApprovalId] = useState(null);
       const [batch, setBatch] = useState(null);
       const processedDisclosure = useRef(null);
+      const managedSkills = useRef(null);
+      const curatorScope = useRef(null);
+      const skillFocus = useRef(null);
       const connection = useRef(null);
       const pending = useRef(false);
       const reading = useRef(null);
@@ -414,10 +430,17 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         const controller = new AbortController();
         connection.current = controller;
-        const timer = setInterval(() => {
-          if (!pending.current && document.visibilityState !== 'hidden') void refresh(controller.signal);
-        }, 15_000);
-        return () => { clearInterval(timer); controller.abort(); };
+        let timer;
+        const schedule = () => {
+          const records = rows(latestData.current?.proposals).concat(rows(latestData.current?.preservedVersions));
+          const delayMs = records.some(autoVerificationActive) ? 2_000 : 15_000;
+          timer = setTimeout(() => {
+            if (!pending.current && document.visibilityState !== 'hidden') void refresh(controller.signal);
+            if (!controller.signal.aborted) schedule();
+          }, delayMs);
+        };
+        schedule();
+        return () => { clearTimeout(timer); controller.abort(); };
       }, []);
 
       useEffect(() => { void refresh(connection.current?.signal, true); }, [currentSessionId]);
@@ -425,6 +448,16 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (approvalInFlight && busy !== 'approveAll') processedDisclosure.current?.querySelector('summary')?.focus();
       }, [approvalInFlight, busy]);
+
+      useEffect(() => {
+        if (busy || !skillFocus.current) return;
+        const row = skillFocus.current;
+        skillFocus.current = null;
+        if (document.activeElement !== row && (row.isConnected || document.activeElement !== document.body)) return;
+        const list = managedSkills.current;
+        const next = list?.open && row.isConnected ? row.querySelector('button[data-ove-skill-action]:enabled') : null;
+        (next || list?.querySelector('summary') || curatorScope.current)?.focus();
+      }, [busy]);
 
       function beginApproval(id, status = 'applying') {
         setApprovalInFlight({ id, status });
@@ -437,9 +470,9 @@ window.__ModuleLoader__.load({
         const updateRows = items => rows(items).map(item => {
           if (item.id !== id) return item;
           const actions = ['preview'];
-          if (status === 'applied' || status === 'restoring') actions.push('rollback');
+          if (status === 'applied') actions.push('rollback');
           if (status === 'pending') actions.push('approve', 'reject');
-          if (status === 'applying' || unconfirmedStates.has(status)) actions.push('approve');
+          if (status === 'applying' || status === 'restoring' || unconfirmedStates.has(status)) actions.push('verifyWrite');
           return { ...item, status, actions, history: [] };
         });
         setData(previous => ({ ...previous, proposals: updateRows(previous?.proposals),
@@ -450,14 +483,16 @@ window.__ModuleLoader__.load({
         const signal = connection.current?.signal;
         if (!signal || signal.aborted || pending.current) return;
         pending.current = true;
+        const skillTransition = Object.hasOwn(skillTransitions, action) ? skillTransitions[action] : null;
+        const skillNotice = skillTransition ? { action, uri: input.uri } : null;
         setBusy(action);
         setConfirmation(null);
-        setNotice(null);
+        setNotice(skillNotice);
         if (action !== 'preview') setBatch(null);
-        const approving = action === 'approve' || action === 'applyDraft';
+        const approving = action === 'approve' || action === 'applyDraft' || action === 'verifyWrite';
         if (approving) {
           if (processedDisclosure.current) processedDisclosure.current.open = false;
-          beginApproval(input.id, verifying ? 'verifying_write' : 'applying');
+          beginApproval(input.id, verifying || action === 'verifyWrite' ? 'verifying_write' : 'applying');
         }
         try {
           const reply = await requestDashboard(signal, { action, input });
@@ -473,12 +508,20 @@ window.__ModuleLoader__.load({
               applyApprovalResult(action, input.id, reply?.status);
               setApprovalInFlight(null);
             }
-            setNotice({ result: reply, action });
+            if (skillTransition) {
+              if (reply === skillTransition.status) {
+                setData(previous => ({ ...previous, curator: { ...previous.curator, skills: rows(previous.curator?.skills).map(item =>
+                  item.uri === input.uri ? { ...item, status: reply, actions: [skillTransition.nextAction] } : item) } }));
+                setNotice({ ...skillNotice, message: skillTransition.success });
+              } else {
+                setNotice({ ...skillNotice, error: reply === 'out_of_scope' ? 'skillOutOfScope' : 'operationFailed' });
+              }
+            } else setNotice({ result: reply, action });
             await refresh(signal, true);
           }
         } catch (cause) {
           if (!signal.aborted) {
-            setNotice({ error: Object.hasOwn(dictionaries.en, cause.message) ? cause.message : 'network' });
+            setNotice({ ...skillNotice, error: Object.hasOwn(dictionaries.en, cause.message) ? cause.message : 'network' });
             if (approving) {
               setApprovalInFlight(null);
               await refresh(signal, true);
@@ -505,7 +548,7 @@ window.__ModuleLoader__.load({
         setBusy('approveAll');
         setConfirmation(null);
         setNotice(null);
-        setBatch({ total: batchTargets.length, results: [] });
+        setBatch({ kind: 'approve', total: batchTargets.length, results: [] });
         if (processedDisclosure.current) processedDisclosure.current.open = false;
         try {
           for (const { id, title, action } of batchTargets) {
@@ -531,11 +574,48 @@ window.__ModuleLoader__.load({
         }
       }
 
-      function actionButton(action, input, label = action) {
-        return h(Button, { key: action, disabled: !!busy || !enabled(action),
-          onKeyDown: action === 'preview' || action === 'applyDraft' ? activateOnEnter : undefined, onClick: () => {
-          if (confirmCopy[action]) setConfirmation({ action, input, copy: label === 'verifyWrite' ? 'confirmVerifyWrite' : confirmCopy[action] });
-          else void run(action, input);
+      async function verifyAll() {
+         const signal = connection.current?.signal;
+         if (!signal || signal.aborted || pending.current || !verificationQueue.length) return;
+         const targets = verificationQueue.map(item => ({ id: item.id, title: item.title ?? item.uri ?? item.id }));
+         pending.current = true;
+         setBusy('verifyAll');
+         setConfirmation(null);
+         setNotice(null);
+         setBatch({ kind: 'verify', total: targets.length, results: [] });
+         try {
+           for (const { id, title } of targets) {
+             if (signal.aborted) return;
+             beginApproval(id, 'verifying_write');
+             let status, errorKey;
+             try {
+               const reply = await requestDashboard(signal, { action: 'verifyWrite', input: { id } });
+               if (signal.aborted) return;
+               status = reply?.status;
+               applyApprovalResult('verifyWrite', id, status);
+             } catch (cause) {
+               if (signal.aborted) return;
+               errorKey = Object.hasOwn(dictionaries.en, cause.message) ? cause.message : 'network';
+             }
+             setBatch(previous => ({ ...previous, results: [...previous.results, { id, title, action: 'verifyWrite', status, errorKey }] }));
+           }
+           setApprovalInFlight(null);
+           await refresh(signal, true);
+         } finally {
+           pending.current = false;
+           if (!signal.aborted) setBusy('');
+         }
+       }
+
+       function actionButton(action, input, label = action) {
+         const wireAction = label === 'verifyWrite' ? 'verifyWrite' : action;
+        return h(Button, { key: action + ':' + wireAction, disabled: !!busy || !enabled(wireAction),
+          'data-ove-skill-action': Object.hasOwn(skillTransitions, action) ? action : undefined,
+          onKeyDown: Object.hasOwn(skillTransitions, action) || action === 'preview' || action === 'applyDraft' || wireAction === 'verifyWrite'
+            ? activateOnEnter : undefined,
+          onClick: () => {
+          if (confirmCopy[action] || wireAction === 'verifyWrite') setConfirmation({ action: wireAction, input, copy: wireAction === 'verifyWrite' ? 'confirmVerifyWrite' : confirmCopy[action] });
+          else void run(wireAction, input);
         } }, t(label));
       }
 
@@ -576,9 +656,13 @@ window.__ModuleLoader__.load({
       const proposals = withApprovalProgress(data?.proposals);
       const pendingProposals = proposals.filter(item => item.status === 'pending' || item.status === 'shadow');
       const processedProposals = proposals.filter(item => item.status !== 'pending' && item.status !== 'shadow');
-      const awaitingVerification = item => unconfirmedStates.has(proposalStatus(item)) ||
-        (item.id !== approvalInFlight?.id && ['applying', 'restoring'].includes(item.status));
-      const verificationQueue = processedProposals.filter(awaitingVerification);
+      const preservedVersions = withApprovalProgress(data?.preservedVersions);
+      const awaitingVerification = item => item.id !== approvalInFlight?.id && canVerifyWrite(item);
+      const proposalVerificationQueue = processedProposals.filter(awaitingVerification);
+      const preservedVerificationQueue = preservedVersions.filter(awaitingVerification);
+      const verificationQueue = [...proposalVerificationQueue, ...preservedVerificationQueue];
+      const showVerifyAll = verificationQueue.length > 0 && enabled('verifyWrite');
+      const hasProposals = proposals.length > 0;
       const lastApproval = processedProposals.find(item => item.id === lastApprovalId);
       const history = rows(data?.history);
       function indexWarning(item) {
@@ -589,20 +673,48 @@ window.__ModuleLoader__.load({
         return h('p', { className: 'ove-muted' }, t(item.status === 'applied' ? 'indexUnconfirmed' : 'removalIndexUnconfirmed'));
       }
 
-      function confirmAction(scope) {
+      function confirmAction(scope, skillUri) {
         if (!confirmation) return null;
         const { action: name, input, copy } = confirmation;
         const proposalAction = proposalActions.includes(name);
-        const location = proposalAction ? 'proposal' : name.startsWith('clear') ? name : undefined;
-        if (scope !== location) return null;
+        const lifecycleAction = Object.hasOwn(skillTransitions, name);
+        const location = proposalAction ? 'proposal' : lifecycleAction ? 'skill' : name;
+        if (scope !== location || (lifecycleAction && input.uri !== skillUri)) return null;
         const item = proposalAction && [...proposals, ...preservedVersions].find(row => row.id === input.id);
-        const target = item?.title ?? item?.uri ?? input.uri ?? input.id;
+        const target = lifecycleAction ? null : item?.title ?? item?.uri ?? input.id;
         return h('section', { className: 'ove-message ove-controls', role: 'group', 'aria-label': t(copy) },
           h('span', null, t(copy), target ? ` ${target}` : ''),
-          h(Button, { autoFocus: proposalAction, onClick: () => setConfirmation(null) }, t('cancel')),
+          h(Button, { autoFocus: proposalAction || lifecycleAction,
+            onKeyDown: lifecycleAction ? activateOnEnter : undefined,
+            onClick: event => {
+              if (lifecycleAction) {
+                const row = event.currentTarget.closest('.ove-skill');
+                (row?.querySelector('button[data-ove-skill-action]:enabled') || row)?.focus();
+              }
+              setConfirmation(null);
+            },
+          }, t('cancel')),
           h(Button, { primary: true, disabled: !!busy || !enabled(name),
-            onClick: () => void run(name, input, copy === 'confirmVerifyWrite') }, t('confirm')));
+            onKeyDown: lifecycleAction ? activateOnEnter : undefined,
+            onClick: event => {
+              if (lifecycleAction) {
+                const row = event.currentTarget.closest('.ove-skill');
+                skillFocus.current = row;
+                row?.focus();
+              }
+              void run(name, input, copy === 'confirmVerifyWrite');
+            },
+          }, t('confirm')));
       }
+      function lifecycleFeedback(collapsed = false) {
+        if (!notice?.uri) return null;
+        const message = notice.error ?? notice.message ?? (busy === notice.action ? skillTransitions[notice.action].progress : null);
+        if (!message) return null;
+        const label = collapsed ? `${notice.uri.split('/').at(-2)} · ` : '';
+        return h('p', { role: notice.error ? 'alert' : 'status',
+          className: collapsed ? 'ove-muted ove-collapsed-skill-feedback' : 'ove-muted' }, label, t(message));
+      }
+
       function draftExplanation({ draftReason, applyBlockedReason }) {
         const reason = draftReasons.has(draftReason) ? draftReason : 'draft_legacy';
         const blocked = draftReasons.has(applyBlockedReason) || applyBlockedReason === 'draft_reviews_disabled' ? applyBlockedReason
@@ -613,19 +725,16 @@ window.__ModuleLoader__.load({
           applyBlockedReason && !stillBlocked && h('p', { className: 'ove-muted' }, t('applyBlockedReason'), ' · ', t(blocked)));
       }
 
-      const preservedVersions = withApprovalProgress(data?.preservedVersions);
       const proposalRow = item => h('li', { key: item.id },
         h('div', { className: 'ove-row' }, h('div', null,
           h('strong', null, item.title ?? item.uri ?? item.id), ' ', h('span', { className: 'ove-status' },
-            item.status === 'shadow' ? t('localDraft') : h(Value, { value: proposalStatus(item), t })),
+            item.status === 'shadow' ? t('localDraft') : h(Value, { value: displayedProposalStatus(item), t })),
           item.createdAt != null && h('p', { className: 'ove-muted' }, localDate(item.createdAt)),
           item.summary && h('p', { className: 'ove-muted' }, item.summary),
           item.status === 'shadow' && draftExplanation(item), indexWarning(item)),
         h('div', { className: 'ove-controls' },
-          proposalActions.filter(action => enabled(action) && (!Array.isArray(item.actions) || item.actions.includes(action)))
-            .map(action => actionButton(action, { id: item.id },
-              (action === 'approve' && item.status !== 'pending' || action === 'rollback' && item.status === 'restoring') && awaitingVerification(item)
-                ? 'verifyWrite' : action)),
+          proposalActions.filter(action => enabled(action) && (!Array.isArray(item.actions) ? action !== 'verifyWrite' : item.actions.includes(action)))
+            .map(action => actionButton(action, { id: item.id }, action)),
           item.status === 'shadow' && !item.applyBlockedReason && enabled('applyDraft') && rows(item.actions).includes('applyDraft') &&
             actionButton('applyDraft', { id: item.id }))),
         preview?.id === item.id && h('div', { className: 'ove-preview' },
@@ -638,13 +747,14 @@ window.__ModuleLoader__.load({
         if (!batch) return null;
         const format = (key, values) => t(key).replace(/\{(\w+)\}/g, (token, name) => values[name] ?? token);
         const done = batch.results.length;
-        const applied = batch.results.filter(item => item.status === 'applied').length;
+        const verifying = batch.kind === 'verify';
+        const completed = batch.results.filter(item => item.status === 'applied' || (verifying && item.status === 'rolled_back')).length;
         const verify = batch.results.filter(item => unconfirmedStates.has(item.status) ||
-          ['applying', 'unresolved_write'].includes(item.status)).length;
-        const other = done - applied - verify;
+          ['applying', 'restoring', 'unresolved_write'].includes(item.status)).length;
+        const other = done - completed - verify;
         return h('div', { className: 'ove-message' },
           h('p', { role: 'status' }, [format('batchProcessed', { done, total: batch.total }),
-            format('batchApplied', { count: applied }), format('batchVerify', { count: verify }),
+            format(verifying ? 'batchVerified' : 'batchApplied', { count: completed }), format('batchVerify', { count: verify }),
             format('batchOther', { count: other })].join(' · ')),
           done > 0 && h('details', null, h('summary', { onKeyDown: activateOnEnter }, t('batchDetails')),
             h('ul', { className: 'ove-list' }, batch.results.map(({ id, title, action, status, errorKey }) => {
@@ -662,9 +772,9 @@ window.__ModuleLoader__.load({
             refreshing && h('span', { role: 'status', className: 'ove-muted' }, t('refreshing')))),
         error && h('p', { role: 'alert', className: 'ove-message' }, t(error)),
         !data && !error && h('p', { role: 'status' }, t('loading')),
-        busy && h('p', { role: 'status', className: 'ove-message' }, t('working')),
-        notice?.error && h('p', { role: 'alert', className: 'ove-message' }, t(notice.error)),
-        notice && !notice.error && !notice.action?.startsWith('clear') && h('div', { className: 'ove-message', role: 'status' },
+        busy && !notice?.uri && h('p', { role: 'status', className: 'ove-message' }, t('working')),
+        notice?.error && !notice.uri && h('p', { role: 'alert', className: 'ove-message' }, t(notice.error)),
+        notice && !notice.error && !notice.uri && !notice.action?.startsWith('clear') && h('div', { className: 'ove-message', role: 'status' },
           h('strong', null, t('result')),
           notice.action === 'run' && notice.result?.status
             ? h(React.Fragment, null, ` · ${known(t, notice.result.status)}`,
@@ -673,7 +783,6 @@ window.__ModuleLoader__.load({
             : notice.action === 'applyDraft'
               ? ` · ${t(draftApplyNotices.get(notice.result?.status) ?? 'draftApplyUnavailable')}`
               : notice.result === null ? ` · ${t('actionComplete')}` : h(Value, { value: notice.result, t })),
-        confirmAction(),
         data && h(React.Fragment, null,
           h(Card, { title: t('settingsTitle') },
             settings.writeConnection && h('p', null, h('strong', null, t('connection')), ' · ',
@@ -714,8 +823,9 @@ window.__ModuleLoader__.load({
             settings.mode !== 'off' && (!settings.provider?.trim() || !settings.model?.trim()) &&
               h('p', { className: 'ove-muted' }, t('usingSessionModel')),
             h(Facts, { t, data: Object.fromEntries(Object.entries(status).filter(([key]) => key !== 'state' && key !== 'status')) })),
-          h(Card, { title: t('proposals'), controls: proposals.length > 0 && h('div', { className: 'ove-controls' },
-            h(Button, { primary: true, disabled: !!busy || !batchTargets.length,
+          h(Card, { title: t('proposals'), controls: (hasProposals || showVerifyAll) && h('div', { className: 'ove-controls' },
+            showVerifyAll && h(Button, { disabled: !!busy, onKeyDown: activateOnEnter, onClick: () => void verifyAll() }, t('verifyAll')),
+            hasProposals && h(Button, { primary: true, disabled: !!busy || !batchTargets.length,
               onKeyDown: activateOnEnter, onClick: () => void approveAll() }, t('approveAll')),
             clearButton('clearProposals', proposals)) },
             confirmAction('proposal'), confirmAction('clearProposals'), clearNotice('clearProposals'), batchResult(),
@@ -723,13 +833,14 @@ window.__ModuleLoader__.load({
               pendingProposals.length > 0 && h(LatestList, { kind: 'pending-proposals', items: pendingProposals, renderItem: proposalRow, t }),
               processedProposals.length > 0 && h('details', { className: 'ove-more', 'data-ove-processed': '', ref: processedDisclosure },
                 h('summary', { onKeyDown: activateOnEnter }, `${t('processedProposals')} (${processedProposals.length})`,
-                  verificationQueue.length > 0 && ` · ${t('needsVerification')} (${verificationQueue.length})`,
+                  proposalVerificationQueue.length > 0 && ` · ${t('needsVerification')} (${proposalVerificationQueue.length})`,
                   lastApproval && h('span', { role: 'status', className: 'ove-muted' }, ` · ${known(t, proposalStatus(lastApproval))}`)),
-                verificationQueue.length > 0 && h('ul', { className: 'ove-list' }, verificationQueue.map(proposalRow)),
+                proposalVerificationQueue.length > 0 && h('ul', { className: 'ove-list' }, proposalVerificationQueue.map(proposalRow)),
                 h(LatestList, { kind: 'processed-proposals', items: processedProposals.filter(item => !awaitingVerification(item)), renderItem: proposalRow, t })))
               : h('p', { className: 'ove-muted' }, t('noProposals')),
             preservedVersions.length > 0 && h('details', { className: 'ove-more' },
-              h('summary', { onKeyDown: activateOnEnter }, `${t('preservedVersions')} (${preservedVersions.length})`),
+              h('summary', { onKeyDown: activateOnEnter }, `${t('preservedVersions')} (${preservedVersions.length})`,
+                 preservedVerificationQueue.length > 0 && ` · ${t('needsVerification')} (${preservedVerificationQueue.length})`),
               h(LatestList, { kind: 'versions', items: preservedVersions, renderItem: proposalRow, t }))),
           h(Card, { title: t('history'), controls: clearButton('clearHistory', history) },
             confirmAction('clearHistory'), clearNotice('clearHistory'),
@@ -738,18 +849,26 @@ window.__ModuleLoader__.load({
                 h(Value, { value: item.status ?? item.state, t })), h(Facts, { data: item, t })),
             ) }) : h('p', { className: 'ove-muted' }, t('noHistory'))),
           h(Card, { title: t('curatorTitle') },
-            h('p', { className: 'ove-muted' }, t('curatorScope')),
+            h('p', { ref: curatorScope, tabIndex: -1, className: 'ove-muted' }, t('curatorScope')),
             h('div', { className: 'ove-controls' }, enabled('curator') && actionButton('curator', {}), enabled('adopt') && h('form', {
               className: 'ove-controls', onSubmit: event => { event.preventDefault(); if (uri.trim()) void run('adopt', { uri: uri.trim() }); },
             }, h('label', null, t('uri'), ' ', h('input', { value: uri, onChange: event => setUri(event.target.value), disabled: !!busy })),
             h(Button, { type: 'submit', disabled: !!busy || !uri.trim() }, t('adopt')))),
             curator.nextScan != null && h('p', { className: 'ove-muted' }, `${t('nextScan')} · ${localDate(curator.nextScan)}`),
             rows(curator.audit).length > 0 && h('details', null, h('summary', null, t('history')), h(Value, { value: curator.audit, t })),
-            skillRows.length ? h('ul', { className: 'ove-list' }, skillRows.map(item => h('li', { className: 'ove-row', key: item.uri },
-              h('div', null, h('strong', null, item.title ?? item.uri), ' ', h('span', { className: 'ove-status' }, h(Value, { value: item.status, t }))),
-              h('div', { className: 'ove-controls' }, skillActions.filter(action => enabled(action) && (item.actions?.includes(action) ??
-                (action === (item.status === 'archived' ? 'restore' : 'archive')))).map(action => actionButton(action, { uri: item.uri }))),
-            ))) : h('p', { className: 'ove-muted' }, t('noSkills'))),
+            notice?.uri && !skillRows.some(item => item.uri === notice.uri) && lifecycleFeedback(),
+            skillRows.length ? h('details', { ref: managedSkills, className: 'ove-more', 'data-ove-managed-skills': '' },
+              h('summary', { onKeyDown: activateOnEnter }, `${t('managedSkills')} (${skillRows.length})`),
+              h('ul', { className: 'ove-list' }, skillRows.map(item => h('li', { className: 'ove-skill', key: item.uri, tabIndex: -1 },
+                h('div', { className: 'ove-row' },
+                  h('div', null, h('strong', null, item.title ?? item.uri), ' ',
+                    h('span', { className: 'ove-status' }, h(Value, { value: item.status, t }))),
+                  h('div', { className: 'ove-controls' }, skillActions.filter(action => enabled(action) && (item.actions?.includes(action) ??
+                    (action === (item.status === 'archived' ? 'restore' : 'archive')))).map(action => actionButton(action, { uri: item.uri })))),
+                confirmAction('skill', item.uri),
+                notice?.uri === item.uri && lifecycleFeedback(),
+              )))) : h('p', { className: 'ove-muted' }, t('noSkills')),
+            notice?.uri && skillRows.some(item => item.uri === notice.uri) && lifecycleFeedback(true)),
           h('div', { className: 'ove-pair' },
             h(Card, { title: t('skillUsage') }, h(Usage, { data: data.usage, t })),
             h(Card, { title: t('memory') }, h(Memory, { data: data.memory, t }))),
@@ -777,6 +896,8 @@ window.__ModuleLoader__.load({
       .ove-dashboard :is(.ove-advanced,.ove-more):not([open]) > :not(summary) { display:none; }
       .ove-more { margin-top:8px; }
       .ove-more[open] > summary { margin-bottom:8px; }
+      [data-ove-managed-skills][open] + .ove-collapsed-skill-feedback { display:none; }
+      .ove-collapsed-skill-feedback { overflow-wrap:anywhere; }
       .ove-advanced > p { margin-top:8px; }
       .ove-settings textarea { resize:vertical; }
       .ove-settings > .ove-controls { grid-column:1 / -1; }
@@ -788,6 +909,7 @@ window.__ModuleLoader__.load({
       .ove-dashboard :is(button,input,select,summary):focus-visible { outline:2px solid var(--dsw-alias-text-primary,currentColor); outline-offset:2px; }
       .ove-list { display:grid; gap:8px; padding:0; margin:0; list-style:none; }
       .ove-list > li { border-top:1px solid var(--dsw-alias-settings-card-stroke,var(--dsw-alias-border-l4)); padding-top:8px; overflow-wrap:anywhere; }
+      .ove-skill { display:grid; gap:8px; }
       .ove-row > div { min-width:0; }
       .ove-facts { display:grid; grid-template-columns:minmax(72px,max-content) minmax(0,1fr); gap:5px 12px; }
       .ove-facts dd { margin:0; min-width:0; overflow-wrap:anywhere; }

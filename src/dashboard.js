@@ -1,7 +1,7 @@
 export const DASHBOARD_PATH = '/api/dsh-openviking-skill-evolution/dashboard';
 
 const ACTIONS = new Set([
-  'run', 'settings', 'preview', 'applyDraft', 'approve', 'reject', 'rollback',
+  'run', 'settings', 'preview', 'applyDraft', 'verifyWrite', 'approve', 'reject', 'rollback',
   'curator', 'adopt', 'archive', 'restore', 'clearProposals', 'clearHistory',
 ]);
 

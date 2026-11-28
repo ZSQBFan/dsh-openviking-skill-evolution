@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.10
+
+- Automatically retry post-write verification up to four times when OpenViking readback is inconclusive. Resume queued verification after restarting DSH and verify timed-out writes without sending the write again.
+- Verify newly created skills against the content returned by OpenViking, including normalized descriptions and attachments. Recheck older unconfirmed creates on startup.
+- Add one-click verification for outstanding writes, including saved versions whose proposals have been cleared.
+- Collapse the managed skill list by default. Show archive and restore confirmation, progress, and results beside each skill, and keep feedback visible when the list is closed. Preserve keyboard focus through the operation.
+
 ## 0.2.9
 
 - Verify the effective OpenViking account before writing private skills. Show why a proposal was saved locally and let users approve eligible drafts directly.

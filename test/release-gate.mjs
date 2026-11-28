@@ -56,7 +56,7 @@ export async function* reviewer(messages, observed) {
   yield { type: 'finish', reason: { kind: 'stop' } };
 }
 
-export async function verifyPublicReview({ request, session, liveBody, observed }) {
+export async function verifyPublicReview({ request, session, liveBody, observed, readbackConflict = false }) {
   const settings = async (mode, revision, route = { provider, model }) => {
     const result = await request('settings', { mode, revision, ...route, reviewTimeoutMs: 5000, maxDurationMs: 90000 });
     assert.deepEqual(result, { status: 'saved', revision: revision + 1 });
@@ -94,8 +94,24 @@ export async function verifyPublicReview({ request, session, liveBody, observed 
   await settings('approval', start.settings.revision);
   const approved = await run('approve', 'pending', baseline, reviewedLine);
   assert.equal(await liveBody(), baseline, 'pending proposal must not write');
-  assert.equal((await request('approve', { id: approved })).status, 'applied');
+  assert.equal((await request('verifyWrite', { id: approved })).status, 'pending');
+  assert.equal(await liveBody(), baseline, 'verification must not dispatch a pending write');
+  const firstApproval = await request('approve', { id: approved });
+  assert.equal(firstApproval.status, readbackConflict ? 'write_unconfirmed' : 'applied');
   assert.equal(await liveBody(), reviewed, 'public approval must write the reviewed fixture body');
+  if (readbackConflict) {
+    assert.deepEqual(firstApproval.diagnostic.ovRequest, { status: 409, operation: 'skill_detail' });
+    const deadline = Date.now() + 8_000;
+    let card;
+    do {
+      card = (await request()).proposals.find(item => item.id === approved);
+      if (card?.status === 'applied') break;
+      assert.equal(card?.status, 'applying');
+      assert.equal(card.verification?.maxAttempts, 4);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < deadline);
+    assert.equal(card?.status, 'applied', 'background verification should recover after the 409');
+  }
   assert.equal((await request()).proposals.find(item => item.id === approved)?.status, 'applied');
 
   await settings('shadow', start.settings.revision + 1, { provider: '', model: '' });
